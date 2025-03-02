@@ -196,13 +196,13 @@ EOL
 
 # Create fvSolution
 cat > $case_dir/system/fvSolution << EOL
-/*--------------------------------*- C++ -*----------------------------------*\\
+/*--------------------------------*- C++ -*----------------------------------*\
 | =========                 |                                                 |
-| \\\\      /  F ield         | OpenFOAM: The Open Source CFD Toolbox           |
-|  \\\\    /   O peration     | Version:  v2412                                 |
-|   \\\\  /    A nd           | Website:  www.openfoam.com                      |
-|    \\\\/     M anipulation  |                                                 |
-\\*---------------------------------------------------------------------------*/
+| \\      /  F ield         | OpenFOAM: The Open Source CFD Toolbox           |
+|  \\    /   O peration     | Version:  v2412                                 |
+|   \\  /    A nd           | Website:  www.openfoam.com                      |
+|    \\/     M anipulation  |                                                 |
+\*---------------------------------------------------------------------------*/
 FoamFile
 {
     version     2.0;
@@ -233,7 +233,7 @@ solvers
 
     "(U|k|omega)Final"
     {
-        \$U;
+        $U;
         relTol          0;
     }
 }
@@ -242,6 +242,11 @@ SIMPLE
 {
     nNonOrthogonalCorrectors 0;
     consistent      yes;
+    
+    // Adding reference pressure settings
+    pRefCell        0;    // Reference cell index
+    pRefValue       0;    // Reference pressure value
+    
     residualControl
     {
         p               1e-4;
@@ -258,6 +263,8 @@ relaxationFactors
         ".*"            0.5;
     }
 }
+
+// ************************************************************************* //
 EOL
 
 # Create initial conditions (0 directory)
@@ -510,7 +517,7 @@ cat > $case_dir/aorta.geo << EOF
 // Parameters for aorta with atherosclerosis
 diameter = 25.0;  // Aorta diameter in mm
 length = 150.0;   // Length of segment in mm
-stenosis_level = $stenosis_level;  // Stenosis level (0.0-1.0)
+stenosis_level = 0.5;  // Stenosis level (0.0-1.0)
 stenosis_length = 20.0;  // Length of the stenotic region in mm
 stenosis_position = length/2;  // Position of stenosis center from inlet
 mesh_size = 0.5;  // Default mesh size
@@ -549,17 +556,40 @@ Line(10) = {5, 10}; // Outlet
 Line Loop(1) = {1, 2, 3, 4, 10, -8, -7, -6, -5, -9};
 Plane Surface(1) = {1};
 
-// Extrude to create 3D
+// Extrude to create 3D with single layer
+// This creates a thin 3D mesh with quad elements
 out[] = Extrude {0, 0, extrude_depth} {
   Surface{1}; Layers{1}; Recombine;
 };
 
-// Define physical groups
-// Define boundaries first (for OpenFOAM BC)
+// Inspect the array to see what IDs are generated
+Printf("Surface ID from extrusion: %g", out[0]);
+Printf("Volume ID from extrusion: %g", out[1]);
+
+// These indices are for the side faces of the extrusion
+Printf("Side face 1: %g", out[2]);
+Printf("Side face 2: %g", out[3]);
+Printf("Side face 3: %g", out[4]);
+Printf("Side face 4: %g", out[5]);
+Printf("Side face 5: %g", out[6]);
+
+// Define physical entities ONE BY ONE (critical for OpenFOAM)
+// Physical Inlet (one surface)
 Physical Surface("inlet") = {9};
+
+// Physical Outlet (one surface)
 Physical Surface("outlet") = {10};
-Physical Surface("wall") = {1, 2, 3, 4, 5, 6, 7, 8};
+
+// Physical Wall (all remaining side faces of the extrusion)
+// Use print statements to identify which indices from out[] refer to the wall faces
+// We explicitly avoid including surfaces used in other physical groups
+Physical Surface("wall") = {out[2], out[3], out[4], out[5], out[6], out[7], out[8], out[9], out[10], out[11]};
+
+// Physical front and back faces (the original surface and the extruded top surface)
+// Here's the critical fix - ensure these surfaces aren't used in any other physical group
 Physical Surface("frontAndBack") = {1, out[0]};
+
+// Physical Volume (the 3D fluid domain)
 Physical Volume("fluid") = {out[1]};
 
 // Mesh settings - create structured hex mesh
