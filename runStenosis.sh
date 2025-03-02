@@ -98,7 +98,7 @@ echo "======================================================="
 # Create system files
 echo_info "Creating OpenFOAM configuration files..."
 
-# Create controlDict
+# Create the controlDict with wall shear stress function enabled
 control_dict_file="$case_dir/system/controlDict"
 cat > "$control_dict_file" << EOL
 /*--------------------------------*- C++ -*----------------------------------*\\
@@ -156,6 +156,7 @@ functions
         type            wallShearStress;
         libs            (fieldFunctionObjects);
         writeFields     yes;
+        executeControl  writeTime;
         writeControl    writeTime;
         patches         (wall);
     }
@@ -165,6 +166,7 @@ functions
     {
         type            yPlus;
         libs            (fieldFunctionObjects);
+        executeControl  writeTime;
         writeFields     yes;
         writeControl    writeTime;
     }
@@ -174,6 +176,7 @@ functions
     {
         type            forces;
         libs            (forces);
+        executeControl  writeTime;
         writeControl    writeTime;
         patches         (wall);
         rho             rhoInf;
@@ -187,10 +190,57 @@ functions
     {
         type            solverInfo;
         libs            (utilityFunctionObjects);
+        executeControl  timeStep;
+        writeControl    timeStep;
         fields          (".*");
+    }
+    
+    // Sample fields along lines
+    sampleLines
+    {
+        type            sets;
+        libs            (sampling);
+        executeControl  writeTime;
+        writeControl    writeTime;
+        
+        sets
+        {
+            centerline
+            {
+                type    uniform;
+                axis    distance;
+                start   (0 0 0.5);
+                end     (150 0 0.5);
+                nPoints 500;
+            }
+            
+            lowerWall
+            {
+                type    uniform;
+                axis    distance;
+                start   (0 -12.5 0.5);
+                end     (150 -12.5 0.5);
+                nPoints 500;
+            }
+            
+            upperWall
+            {
+                type    uniform;
+                axis    distance;
+                start   (0 12.5 0.5);
+                end     (150 12.5 0.5);
+                nPoints 500;
+            }
+        }
+        
+        fields          (p U wallShearStress);
+        interpolationScheme cellPoint;
+        setFormat       raw;
     }
 }
 EOL
+
+verify_file "$control_dict_file"
 
 verify_file "$control_dict_file"
 
@@ -396,7 +446,7 @@ EOL
 
 verify_file "$transport_file"
 
-# Create initial field files (0 directory)
+# STEP 2: CREATE INITIAL CONDITIONS (0 directory)
 echo_info "Creating initial conditions..."
 
 # p (pressure)
@@ -426,17 +476,18 @@ boundaryField
 {
     inlet
     {
-        // inlet settings
+        type            zeroGradient;
     }
 
     outlet
     {
-        // outlet settings 
+        type            fixedValue;
+        value           uniform 0;
     }
 
     wall
     {
-        // wall settings
+        type            zeroGradient;
     }
 
     frontAndBack
@@ -444,6 +495,8 @@ boundaryField
         type            empty;
     }
 }
+
+// ************************************************************************* //
 EOL
 
 verify_file "$p_file"
@@ -475,17 +528,18 @@ boundaryField
 {
     inlet
     {
-        // inlet settings
+        type            fixedValue;
+        value           uniform (0.4 0 0);
     }
 
     outlet
     {
-        // outlet settings 
+        type            zeroGradient;
     }
 
     wall
     {
-        // wall settings
+        type            noSlip;
     }
 
     frontAndBack
@@ -493,6 +547,8 @@ boundaryField
         type            empty;
     }
 }
+
+// ************************************************************************* //
 EOL
 
 verify_file "$u_file"
@@ -524,17 +580,19 @@ boundaryField
 {
     inlet
     {
-        // inlet settings
+        type            fixedValue;
+        value           uniform 0.0006;
     }
 
     outlet
     {
-        // outlet settings 
+        type            zeroGradient;
     }
 
     wall
     {
-        // wall settings
+        type            kqRWallFunction;
+        value           uniform 0.0006;
     }
 
     frontAndBack
@@ -542,6 +600,8 @@ boundaryField
         type            empty;
     }
 }
+
+// ************************************************************************* //
 EOL
 
 verify_file "$k_file"
@@ -573,17 +633,19 @@ boundaryField
 {
     inlet
     {
-        // inlet settings
+        type            fixedValue;
+        value           uniform 100;
     }
 
     outlet
     {
-        // outlet settings 
+        type            zeroGradient;
     }
 
     wall
     {
-        // wall settings
+        type            omegaWallFunction;
+        value           uniform 100;
     }
 
     frontAndBack
@@ -591,6 +653,8 @@ boundaryField
         type            empty;
     }
 }
+
+// ************************************************************************* //
 EOL
 
 verify_file "$omega_file"
@@ -622,17 +686,20 @@ boundaryField
 {
     inlet
     {
-        // inlet settings
+        type            calculated;
+        value           uniform 0;
     }
 
     outlet
     {
-        // outlet settings 
+        type            calculated;
+        value           uniform 0;
     }
 
     wall
     {
-        // wall settings
+        type            nutkWallFunction;
+        value           uniform 0;
     }
 
     frontAndBack
@@ -640,23 +707,53 @@ boundaryField
         type            empty;
     }
 }
+
+// ************************************************************************* //
 EOL
 
 verify_file "$nut_file"
 
-# STEP 2: CREATE GEOMETRY AND MESH
+# STEP 3: CREATE GEOMETRY AND MESH
 
-# Create blockMeshDict for the aorta with stenosis
+# Create a fixed blockMeshDict file without using #calc or #codeStream
 echo_info "Creating blockMesh dictionary..."
 block_mesh_file="$case_dir/system/blockMeshDict"
+
+# Calculate stenosis radius (safer to do it here in the script)
+AORTA_RADIUS=12.5 # mm
+STENOSIS_RADIUS=$(echo "$AORTA_RADIUS * (1.0 - $stenosis_level)" | bc -l)
+AORTA_LENGTH=150.0 # mm
+STENOSIS_LENGTH=20.0 # mm
+STENOSIS_POS=$(echo "$AORTA_LENGTH / 2" | bc -l)
+INLET_POS=$(echo "$STENOSIS_POS - $STENOSIS_LENGTH / 2" | bc -l)
+OUTLET_POS=$(echo "$STENOSIS_POS + $STENOSIS_LENGTH / 2" | bc -l)
+
+# Calculate proportions for cell distribution
+FIRST_LENGTH=$(echo "$INLET_POS / $AORTA_LENGTH" | bc -l)
+STENOSIS_SECTION=$(echo "$STENOSIS_LENGTH / $AORTA_LENGTH" | bc -l)
+LAST_LENGTH=$(echo "1.0 - $FIRST_LENGTH - $STENOSIS_SECTION" | bc -l)
+
+# Calculate cell counts
+TOTAL_CELLS_LENGTH=100
+CELLS_FIRST=$(echo "($FIRST_LENGTH * $TOTAL_CELLS_LENGTH)/1" | bc)
+CELLS_STENOSIS=$(echo "($STENOSIS_SECTION * $TOTAL_CELLS_LENGTH)/1" | bc)
+CELLS_LAST=$(echo "($LAST_LENGTH * $TOTAL_CELLS_LENGTH)/1" | bc)
+CELLS_CHECK=$(echo "$CELLS_FIRST + $CELLS_STENOSIS + $CELLS_LAST" | bc)
+
+# Adjust if rounding created too few/many cells
+if [ "$CELLS_CHECK" -ne "$TOTAL_CELLS_LENGTH" ]; then
+    CELLS_FIRST=$(echo "$CELLS_FIRST + ($TOTAL_CELLS_LENGTH - $CELLS_CHECK)" | bc)
+fi
+
+# Create the blockMeshDict with explicitly calculated values
 cat > "$block_mesh_file" << EOL
-/*--------------------------------*- C++ -*----------------------------------*\
+/*--------------------------------*- C++ -*----------------------------------*\\
 | =========                 |                                                 |
-| \\      /  F ield         | OpenFOAM: The Open Source CFD Toolbox           |
-|  \\    /   O peration     | Version:  v2412                                 |
-|   \\  /    A nd           | Website:  www.openfoam.com                      |
-|    \\/     M anipulation  |                                                 |
-\*---------------------------------------------------------------------------*/
+| \\\\      /  F ield         | OpenFOAM: The Open Source CFD Toolbox           |
+|  \\\\    /   O peration     | Version:  v2412                                 |
+|   \\\\  /    A nd           | Website:  www.openfoam.com                      |
+|    \\\\/     M anipulation  |                                                 |
+\\*---------------------------------------------------------------------------*/
 FoamFile
 {
     version     2.0;
@@ -669,100 +766,66 @@ FoamFile
 // Convert mm to m
 scale 0.001;
 
-// Stenosis parameters
-radius           12.5;    // Aorta radius in mm
-length           150;     // Total length in mm
-stenosisLevel    $stenosis_level;   // Level of stenosis (0-1)
-stenosisLength   20;      // Length of stenotic region in mm
-stenosisPos      75;      // Position of stenosis center
-
-// Calculate narrowed radius at stenosis
-stenosisRadius   #calc "radius * (1.0 - stenosisLevel)";
-
-// Number of cells
-nCellsLength     100;     // Number of cells along length
-nCellsRadial     15;      // Number of cells in radial direction
-nCellsThickness  1;       // One cell in z-direction (2D simulation)
-
-// Define z-thickness (small value for quasi-2D)
-zThickness       1;
-
-// Define positions
-xMin             0;
-xInlet           #calc "stenosisPos - stenosisLength/2";
-xStenosis        stenosisPos;
-xOutlet          #calc "stenosisPos + stenosisLength/2";
-xMax             length;
-
-// Proportional cell distributions
-firstLength      #calc "(stenosisPos - stenosisLength/2) / length";
-stenosisSection  #calc "stenosisLength / length";
-lastLength       #calc "1.0 - firstLength - stenosisSection";
+// Stenosis parameters (pre-calculated)
+// Radius: $AORTA_RADIUS mm
+// Stenosis level: $stenosis_level
+// Stenosis radius: $STENOSIS_RADIUS mm
 
 vertices
 (
     // Bottom face, inlet to stenosis start
-    (0        -radius          0)          // 0
-    (xInlet   -radius          0)          // 1
-    (xInlet   -radius          zThickness) // 2
-    (0        -radius          zThickness) // 3
+    (0              -$AORTA_RADIUS      0)          // 0
+    ($INLET_POS     -$AORTA_RADIUS      0)          // 1
+    ($INLET_POS     -$AORTA_RADIUS      1)          // 2
+    (0              -$AORTA_RADIUS      1)          // 3
     
     // Bottom face at stenosis
-    (xStenosis -stenosisRadius 0)          // 4
-    (xStenosis -stenosisRadius zThickness) // 5
+    ($STENOSIS_POS  -$STENOSIS_RADIUS   0)          // 4
+    ($STENOSIS_POS  -$STENOSIS_RADIUS   1)          // 5
     
     // Bottom face, stenosis to outlet
-    (xOutlet  -radius          0)          // 6
-    (xOutlet  -radius          zThickness) // 7
-    (xMax     -radius          0)          // 8
-    (xMax     -radius          zThickness) // 9
+    ($OUTLET_POS    -$AORTA_RADIUS      0)          // 6
+    ($OUTLET_POS    -$AORTA_RADIUS      1)          // 7
+    ($AORTA_LENGTH  -$AORTA_RADIUS      0)          // 8
+    ($AORTA_LENGTH  -$AORTA_RADIUS      1)          // 9
     
     // Top face, inlet to stenosis start
-    (0        radius           0)          // 10
-    (xInlet   radius           0)          // 11
-    (xInlet   radius           zThickness) // 12
-    (0        radius           zThickness) // 13
+    (0              $AORTA_RADIUS       0)          // 10
+    ($INLET_POS     $AORTA_RADIUS       0)          // 11
+    ($INLET_POS     $AORTA_RADIUS       1)          // 12
+    (0              $AORTA_RADIUS       1)          // 13
     
     // Top face at stenosis
-    (xStenosis stenosisRadius  0)          // 14
-    (xStenosis stenosisRadius  zThickness) // 15
+    ($STENOSIS_POS  $STENOSIS_RADIUS    0)          // 14
+    ($STENOSIS_POS  $STENOSIS_RADIUS    1)          // 15
     
     // Top face, stenosis to outlet
-    (xOutlet  radius           0)          // 16
-    (xOutlet  radius           zThickness) // 17
-    (xMax     radius           0)          // 18
-    (xMax     radius           zThickness) // 19
+    ($OUTLET_POS    $AORTA_RADIUS       0)          // 16
+    ($OUTLET_POS    $AORTA_RADIUS       1)          // 17
+    ($AORTA_LENGTH  $AORTA_RADIUS       0)          // 18
+    ($AORTA_LENGTH  $AORTA_RADIUS       1)          // 19
 );
-
-// Calculate cell distribution
-nCellsFirst      #calc "round($firstLength * $nCellsLength)";
-nCellsStenosis   #calc "round($stenosisSection * $nCellsLength)";
-nCellsLast       #calc "round($lastLength * $nCellsLength)";
-
-// Adjust if rounding created too few/many cells
-nCellsCheck      #calc "$nCellsFirst + $nCellsStenosis + $nCellsLast";
-nCellsFirst      #calc "$nCellsFirst + ($nCellsLength - $nCellsCheck)";
 
 blocks
 (
     // Block 0: Inlet to stenosis start
     hex (0 1 11 10 3 2 12 13)
-    ($nCellsFirst $nCellsRadial $nCellsThickness)
+    ($CELLS_FIRST 15 1)
     simpleGrading (1 1 1)
     
-    // Block 1: Stenosis section
+    // Block 1: Stenosis section (first half)
     hex (1 4 14 11 2 5 15 12)
-    ($nCellsStenosis $nCellsRadial $nCellsThickness)
+    ($CELLS_STENOSIS 15 1)
     simpleGrading (1 1 1)
     
-    // Block 2: Stenosis to outlet
+    // Block 2: Stenosis section (second half)
     hex (4 6 16 14 5 7 17 15)
-    ($nCellsStenosis $nCellsRadial $nCellsThickness)
+    ($CELLS_STENOSIS 15 1)
     simpleGrading (1 1 1)
     
     // Block 3: Outlet section
     hex (6 8 18 16 7 9 19 17)
-    ($nCellsLast $nCellsRadial $nCellsThickness)
+    ($CELLS_LAST 15 1)
     simpleGrading (1 1 1)
 );
 
@@ -835,16 +898,6 @@ EOL
 
 verify_file "$block_mesh_file"
 
-# Replace the Gmsh call with blockMesh
-echo_info "Generating mesh with blockMesh..."
-blockMesh -case "$case_dir" > "$case_dir/blockMesh.log" 2>&1
-
-# Exit if blockMesh failed
-if [ $? -ne 0 ]; then
-    echo_error "blockMesh failed to generate the mesh. Check log for details."
-    cat "$case_dir/blockMesh.log"
-    exit 1
-fi
 # Create decomposeParDict for parallel execution (optional)
 decompose_file="$case_dir/system/decomposeParDict"
 cat > "$decompose_file" << EOL
@@ -873,83 +926,269 @@ EOL
 
 verify_file "$decompose_file"
 
-# STEP 3: GENERATE MESH AND RUN SIMULATION
-echo_info "Generating 2D mesh with gmsh..."
-gmsh -2 "$case_dir/aorta.geo" -o "$case_dir/aorta.msh"
+# Create a Gmsh geometry file for the aorta with stenosis (still include this for reference)
+echo_info "Creating Gmsh geometry file..."
+gmsh_geo_file="$case_dir/aorta.geo"
+cat > "$gmsh_geo_file" << EOL
+// Parameters for aorta with atherosclerosis
+diameter = 25.0;  // Aorta diameter in mm (average adult aorta ~25mm)
+length = 150.0;   // Length of segment in mm
+stenosis_level = $stenosis_level;  // 0.0 = no stenosis, 1.0 = complete occlusion
+stenosis_length = 20.0;  // Length of the stenotic region in mm
+stenosis_position = length/2;  // Position of stenosis center from inlet
+mesh_size = $mesh_size;  // Default mesh size (smaller values create finer mesh)
 
-# Exit if gmsh failed
+// Calculate stenosis height based on stenosis level
+stenosis_height = diameter * stenosis_level / 2;
+
+// Points for upper wall
+Point(1) = {0, diameter/2, 0, mesh_size};  // Inlet top
+Point(2) = {stenosis_position - stenosis_length/2, diameter/2, 0, mesh_size};  // Start of stenosis top
+Point(3) = {stenosis_position, diameter/2 - stenosis_height, 0, mesh_size/4};  // Peak of stenosis top (finer mesh)
+Point(4) = {stenosis_position + stenosis_length/2, diameter/2, 0, mesh_size};  // End of stenosis top
+Point(5) = {length, diameter/2, 0, mesh_size};  // Outlet top
+
+// Points for lower wall
+Point(6) = {0, -diameter/2, 0, mesh_size};  // Inlet bottom
+Point(7) = {stenosis_position - stenosis_length/2, -diameter/2, 0, mesh_size};  // Start of stenosis bottom
+Point(8) = {stenosis_position, -diameter/2 + stenosis_height, 0, mesh_size/4};  // Peak of stenosis bottom (finer mesh)
+Point(9) = {stenosis_position + stenosis_length/2, -diameter/2, 0, mesh_size};  // End of stenosis bottom
+Point(10) = {length, -diameter/2, 0, mesh_size};  // Outlet bottom
+
+// Create splines for the walls (smoother than straight lines)
+Spline(1) = {1, 2, 3, 4, 5};  // Upper wall
+Spline(2) = {6, 7, 8, 9, 10};  // Lower wall
+
+// Create inlet and outlet lines
+Line(3) = {1, 6};  // Inlet
+Line(4) = {5, 10}; // Outlet
+
+// Create surface for the fluid domain
+Line Loop(1) = {1, 4, -2, -3};
+Plane Surface(1) = {1};
+
+// Define physical groups for OpenFOAM boundary conditions
+Physical Curve("inlet") = {3};
+Physical Curve("outlet") = {4};
+Physical Curve("wall") = {1, 2};
+Physical Surface("fluid") = {1};
+
+// Mesh settings for better quality
+Mesh.RecombineAll = 1;  // Generate quadrilateral elements where possible
+Mesh.Smoothing = 20;    // Mesh smoothing steps
+Mesh.Algorithm = 6;     // Frontal-Delaunay for quads
+EOL
+
+verify_file "$gmsh_geo_file"
+
+# Create sampleDict for post-processing
+echo_info "Creating sampling dictionary for centerline data extraction..."
+sample_dict_file="$case_dir/system/sampleDict"
+cat > "$sample_dict_file" << EOL
+/*--------------------------------*- C++ -*----------------------------------*\\
+| =========                 |                                                 |
+| \\\\      /  F ield         | OpenFOAM: The Open Source CFD Toolbox           |
+|  \\\\    /   O peration     | Version:  v2412                                 |
+|   \\\\  /    A nd           | Website:  www.openfoam.com                      |
+|    \\\\/     M anipulation  |                                                 |
+\\*---------------------------------------------------------------------------*/
+FoamFile
+{
+    version     2.0;
+    format      ascii;
+    class       dictionary;
+    object      sampleDict;
+}
+// * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * //
+
+type            sets;
+libs            (sampling);
+interpolationScheme cellPoint;
+setFormat       raw;
+
+fields          ( p U wallShearStress );
+
+sets
+{
+    centerline
+    {
+        type    uniform;
+        axis    distance;
+        start   (0 0 0.5);
+        end     (150 0 0.5);
+        nPoints 500;
+    }
+    
+    lowerWall
+    {
+        type    uniform;
+        axis    distance;
+        start   (0 -12.5 0.5);
+        end     (150 -12.5 0.5);
+        nPoints 500;
+    }
+    
+    upperWall
+    {
+        type    uniform;
+        axis    distance;
+        start   (0 12.5 0.5);
+        end     (150 12.5 0.5);
+        nPoints 500;
+    }
+}
+
+// ************************************************************************* //
+EOL
+
+verify_file "$sample_dict_file"
+
+# Add function object for wall shear stress to controlDict
+echo_info "Updating controlDict for wall shear stress calculation..."
+wall_shear_dict="$case_dir/system/wallShearStressDict"
+cat > "$wall_shear_dict" << EOL
+/*--------------------------------*- C++ -*----------------------------------*\\
+| =========                 |                                                 |
+| \\\\      /  F ield         | OpenFOAM: The Open Source CFD Toolbox           |
+|  \\\\    /   O peration     | Version:  v2412                                 |
+|   \\\\  /    A nd           | Website:  www.openfoam.com                      |
+|    \\\\/     M anipulation  |                                                 |
+\\*---------------------------------------------------------------------------*/
+FoamFile
+{
+    version     2.0;
+    format      ascii;
+    class       dictionary;
+    object      wallShearStressDict;
+}
+// * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * //
+
+type            wallShearStress;
+libs            (fieldFunctionObjects);
+patches         (wall);
+writeControl    writeTime;
+writeFields     yes;
+executeControl  writeTime;
+
+// ************************************************************************* //
+EOL
+
+verify_file "$wall_shear_dict"
+
+# STEP 4: MESH GENERATION AND SIMULATION SETUP
+echo_info "Setting up mesh and simulation..."
+
+# Option 1: Use blockMesh (more reliable)
+echo_info "Generating mesh with blockMesh..."
+blockMesh -case "$case_dir" > "$case_dir/blockMesh.log" 2>&1
+
 if [ $? -ne 0 ]; then
-    echo_error "Gmsh failed to generate the mesh. Exiting."
+    echo_error "blockMesh failed. Check log for details: $case_dir/blockMesh.log"
+    cat "$case_dir/blockMesh.log"
     exit 1
 fi
+echo_success "blockMesh completed successfully"
 
-echo_info "Converting mesh to OpenFOAM format..."
-gmshToFoam "$case_dir/aorta.msh" -case "$case_dir"
-
-# Exit if conversion failed
-if [ $? -ne 0 ]; then
-    echo_error "gmshToFoam failed to convert the mesh. Exiting."
-    exit 1
-fi
-
-# Fix boundary types
-echo_info "Fixing mesh boundary conditions..."
-boundaryFile="$case_dir/constant/polyMesh/boundary"
-
-# Check if boundary file exists
-if [ ! -f "$boundaryFile" ]; then
-    echo_error "Boundary file not found at $boundaryFile"
-    echo_info "This may indicate an issue with the mesh generation or conversion."
-    echo_info "Check the gmsh and gmshToFoam output for errors."
-    ls -la "$case_dir/constant/polyMesh/"
-    exit 1
-fi
-
-# Create a backup of the boundary file
-cp "$boundaryFile" "${boundaryFile}.backup"
-
-
-# Verify files exist before running
-echo_info "Verifying OpenFOAM case setup before running..."
-required_files=(
-    "$case_dir/0/p"
-    "$case_dir/0/U"
-    "$case_dir/0/k"
-    "$case_dir/0/omega"
-    "$case_dir/0/nut"
-    "$case_dir/constant/turbulenceProperties"
-    "$case_dir/constant/transportProperties"
-    "$case_dir/system/controlDict"
-    "$case_dir/system/fvSchemes"
-    "$case_dir/system/fvSolution"
-    "$case_dir/constant/polyMesh/boundary"
-)
-
-for file in "${required_files[@]}"; do
-    if [ ! -f "$file" ]; then
-        echo_error "Required file missing: $file"
+# Option 2: Alternative to use Gmsh if blockMesh fails
+if [ ! -d "$case_dir/constant/polyMesh" ] || [ ! -f "$case_dir/constant/polyMesh/points" ]; then
+    echo_warning "blockMesh output not found, trying with Gmsh instead..."
+    
+    # Run Gmsh to generate the mesh
+    echo_info "Generating mesh with Gmsh..."
+    gmsh -2 "$case_dir/aorta.geo" -o "$case_dir/aorta.msh" > "$case_dir/gmsh.log" 2>&1
+    
+    if [ $? -ne 0 ]; then
+        echo_error "Gmsh failed to generate the mesh. Check log: $case_dir/gmsh.log"
+        cat "$case_dir/gmsh.log"
         exit 1
-    else
-        echo_info "Verified: $file exists"
     fi
-done
+    
+    echo_info "Converting Gmsh mesh to OpenFOAM format..."
+    gmshToFoam "$case_dir/aorta.msh" -case "$case_dir" > "$case_dir/gmshToFoam.log" 2>&1
+    
+    if [ $? -ne 0 ]; then
+        echo_error "gmshToFoam conversion failed. Check log: $case_dir/gmshToFoam.log"
+        cat "$case_dir/gmshToFoam.log"
+        exit 1
+    fi
+    
+    # Update boundary file if needed
+    echo_info "Updating boundary conditions after Gmsh conversion..."
+    createPatch -overwrite -case "$case_dir" > "$case_dir/createPatch.log" 2>&1
+fi
 
-# Check mesh
+# Check mesh quality
 echo_info "Checking mesh quality..."
 checkMesh -case "$case_dir" > "$case_dir/checkMesh.log" 2>&1
 
-# Run the simulation
-echo_info "Running OpenFOAM simulation for $case_name stenosis..."
+# Check for mesh errors
+if grep -q "FAILED" "$case_dir/checkMesh.log"; then
+    echo_warning "Mesh check found issues. See details in: $case_dir/checkMesh.log"
+    echo_info "This may impact simulation accuracy, but we'll proceed anyway."
+else
+    echo_success "Mesh check passed successfully"
+fi
+
+# STEP 5: RUN THE SIMULATION
+echo_info "Starting OpenFOAM simulation for stenosis level $stenosis_level..."
+echo_info "This may take several minutes depending on your computer..."
+
+# Run in serial mode
 simpleFoam -case "$case_dir" > "$case_dir/simpleFoam.log" 2>&1
 
 # Check if simulation completed successfully
 if [ $? -eq 0 ]; then
-    echo_success "Completed simulation for $case_name stenosis"
-    echo_info "Results can be found in directory: $case_dir"
-    echo_info "Visualize results using: paraFoam -case $case_dir"
+    echo_success "Simulation completed successfully!"
+    echo_info "Results available in directory: $case_dir"
+    
+    # Run post-processing for wall shear stress
+    echo_info "Running post-processing for visualization data..."
+    
+    # Get the latest time directory
+    latest_time=$(find "$case_dir" -maxdepth 1 -name "[0-9]*" | sort -n | tail -1)
+    latest_time_value=$(basename "$latest_time")
+    
+    if [ ! -z "$latest_time_value" ]; then
+        echo_info "Using latest time directory: $latest_time_value"
+        
+        # Calculate wall shear stress using the wallShearStress function object
+        postProcess -func wallShearStress -case "$case_dir" -time "$latest_time_value" > "$case_dir/postWallShearStress.log" 2>&1
+        
+        # Sample data along centerline and walls
+        postProcess -func sample -case "$case_dir" -time "$latest_time_value" > "$case_dir/postSample.log" 2>&1
+        
+        # Create basic plots directory
+        mkdir -p "plots"
+        echo_info "Creating basic result plots in 'plots' directory..."
+        
+        if [ -f "plot_results.py" ]; then
+            python3 plot_results.py --dirs "$case_dir" --all
+            echo_success "Created visualization plots in 'plots' directory"
+        else
+            echo_warning "plot_results.py not found, skipping automatic plot generation"
+        fi
+    else
+        echo_warning "No time directories found. Post-processing skipped."
+    fi
+    
+    echo_info "You can visualize results with: paraFoam -case $case_dir"
 else
-    echo_warning "Simulation may have encountered issues. Check log file: $case_dir/simpleFoam.log"
-    # Print the last few lines of the log to help diagnose
-    echo_info "Last 10 lines of the log file:"
-    tail -n 10 "$case_dir/simpleFoam.log"
+    echo_error "Simulation encountered errors. Check log file: $case_dir/simpleFoam.log"
+    echo_info "Last 20 lines of the log file:"
+    tail -n 20 "$case_dir/simpleFoam.log"
+    
+    # Try to identify specific errors
+    if grep -q "attempt to read beyond EOF" "$case_dir/simpleFoam.log"; then
+        echo_error "EOF error detected in boundary conditions. This usually indicates a problem with the field files in the 0/ directory."
+    fi
+    if grep -q "could not find file" "$case_dir/simpleFoam.log"; then
+        echo_error "Missing file error detected. Check that all required files exist."
+    fi
+    if grep -q "divergence" "$case_dir/simpleFoam.log"; then
+        echo_error "Solution divergence detected. Try reducing relaxation factors in system/fvSolution."
+    fi
 fi
+
+echo "======================================================="
+echo "Simulation complete for stenosis level: $stenosis_level"
+echo "======================================================="
