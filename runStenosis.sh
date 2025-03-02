@@ -93,124 +93,12 @@ echo "======================================================="
 echo "Processing stenosis level: $case_name ($stenosis_level)"
 echo "======================================================="
 
-# Create Gmsh script with parametric stenosis
-echo_info "Creating Gmsh geometry script..."
-geo_file="$case_dir/aorta.geo"
-cat > "$geo_file" << EOF
-// Parameters for aorta with atherosclerosis
-diameter = 25.0;  // Aorta diameter in mm
-length = 150.0;   // Length of segment in mm
-stenosis_level = $stenosis_level;  // Stenosis level (0.0-1.0)
-stenosis_length = 20.0;  // Length of the stenotic region in mm
-stenosis_position = length/2;  // Position of stenosis center from inlet
-mesh_size = $mesh_size;  // Default mesh size
-extrude_depth = 1.0;  // Depth for 3D extrusion
+# STEP 1: CREATE ALL OPENFOAM CONFIGURATION FILES FIRST
 
-// Calculate stenosis height based on stenosis level
-stenosis_height = diameter * stenosis_level / 2;
-
-// Points for upper wall
-Point(1) = {0, diameter/2, 0, mesh_size};  // Inlet top
-Point(2) = {stenosis_position - stenosis_length/2, diameter/2, 0, mesh_size};  // Start of stenosis top
-Point(3) = {stenosis_position, diameter/2 - stenosis_height, 0, mesh_size/4};  // Peak of stenosis top 
-Point(4) = {stenosis_position + stenosis_length/2, diameter/2, 0, mesh_size};  // End of stenosis top
-Point(5) = {length, diameter/2, 0, mesh_size};  // Outlet top
-
-// Points for lower wall
-Point(6) = {0, -diameter/2, 0, mesh_size};  // Inlet bottom
-Point(7) = {stenosis_position - stenosis_length/2, -diameter/2, 0, mesh_size};  // Start of stenosis bottom
-Point(8) = {stenosis_position, -diameter/2 + stenosis_height, 0, mesh_size/4};  // Peak of stenosis bottom 
-Point(9) = {stenosis_position + stenosis_length/2, -diameter/2, 0, mesh_size};  // End of stenosis bottom
-Point(10) = {length, -diameter/2, 0, mesh_size};  // Outlet bottom
-
-// Create splines for the walls (smoother than straight lines)
-Spline(1) = {1, 2, 3, 4, 5};  // Upper wall
-Spline(2) = {6, 7, 8, 9, 10};  // Lower wall
-
-// Create inlet and outlet lines
-Line(3) = {1, 6};  // Inlet
-Line(4) = {5, 10}; // Outlet
-
-// Create the 2D surface
-Line Loop(1) = {1, 4, -2, -3};
-Plane Surface(1) = {1};
-
-// Extrude to create 3D with single layer
-// This creates a thin 3D mesh with quad elements
-out[] = Extrude {0, 0, extrude_depth} {
-  Surface{1}; Layers{1}; Recombine;
-};
-
-// Define physical entities with clear naming
-Physical Surface("inlet") = {3};       // Inlet face
-Physical Surface("outlet") = {4};      // Outlet face
-Physical Surface("wall") = {1, 2};     // Wall faces (upper and lower)
-Physical Surface("frontAndBack") = {1, out[0]}; // Front and back faces
-Physical Volume("fluid") = {out[1]};   // Fluid volume
-
-// Mesh settings - create structured hex mesh
-Mesh.RecombineAll = 1;
-Mesh.Algorithm = 8; // Delaunay for quads
-Mesh.ElementOrder = 1;
-Mesh.Smoothing = 20;
-EOF
-
-verify_file "$geo_file"
-
-echo "Generating 3D mesh with gmsh..."
-gmsh -3 $case_dir/aorta.geo -o $case_dir/aorta.msh
-
-# Exit if gmsh failed
-if [ $? -ne 0 ]; then
-    echo "❌ ERROR: Gmsh failed to generate the mesh. Exiting."
-    exit 1
-fi
-
-echo "Converting mesh to OpenFOAM format..."
-gmshToFoam $case_dir/aorta.msh -case $case_dir
-
-# Exit if conversion failed
-if [ $? -ne 0 ]; then
-    echo "❌ ERROR: gmshToFoam failed to convert the mesh. Exiting."
-    exit 1
-fi
-
-# Fix boundary types
-echo_info "Fixing mesh boundary conditions..."
-boundaryFile="$case_dir/constant/polyMesh/boundary"
-
-# Check if boundary file exists
-if [ ! -f "$boundaryFile" ]; then
-    echo_error "Boundary file not found at $boundaryFile"
-    echo_info "This may indicate an issue with the mesh generation or conversion."
-    echo_info "Check the gmsh and gmshToFoam output for errors."
-    ls -la "$case_dir/constant/polyMesh/"
-    exit 1
-fi
-
-# Create a backup of the boundary file
-cp "$boundaryFile" "${boundaryFile}.backup"
-
-# Use sed to modify boundary conditions (compatible with macOS and Linux)
-if [ "$OS" == "Darwin" ]; then
-    # macOS version of sed requires empty string after -i
-    sed -i '' -e '/inlet/,/}/s/type.*;/type            patch;/' "$boundaryFile"
-    sed -i '' -e '/outlet/,/}/s/type.*;/type            patch;/' "$boundaryFile"
-    sed -i '' -e '/wall/,/}/s/type.*;/type            wall;/' "$boundaryFile"
-    sed -i '' -e '/frontAndBack/,/}/s/type.*;/type            empty;/' "$boundaryFile"
-else
-    # Linux version of sed
-    sed -i -e '/inlet/,/}/s/type.*;/type            patch;/' "$boundaryFile"
-    sed -i -e '/outlet/,/}/s/type.*;/type            patch;/' "$boundaryFile"
-    sed -i -e '/wall/,/}/s/type.*;/type            wall;/' "$boundaryFile"
-    sed -i -e '/frontAndBack/,/}/s/type.*;/type            empty;/' "$boundaryFile"
-fi
-
-# Create OpenFOAM configuration files
-echo "Creating OpenFOAM configuration files..."
+# Create system files
+echo_info "Creating OpenFOAM configuration files..."
 
 # Create controlDict
-echo_info "Creating OpenFOAM configuration files..."
 control_dict_file="$case_dir/system/controlDict"
 cat > "$control_dict_file" << EOL
 /*--------------------------------*- C++ -*----------------------------------*\\
@@ -304,15 +192,7 @@ functions
 }
 EOL
 
-verify_file "$nut_file"
-
-verify_file "$omega_file"
-
-verify_file "$k_file"
-
-verify_file "$u_file"
-
-verify_file "$p_file"
+verify_file "$control_dict_file"
 
 # Create fvSchemes
 fv_schemes_file="$case_dir/system/fvSchemes"
@@ -454,255 +334,10 @@ EOL
 
 verify_file "$fv_solution_file"
 
-# Create initial conditions (0 directory)
-echo_info "Creating initial conditions..."
-
-# p (pressure)
-p_file="$case_dir/0/p"
-cat > "$p_file" << EOL
-/*--------------------------------*- C++ -*----------------------------------*\\
-| =========                 |                                                 |
-| \\\\      /  F ield         | OpenFOAM: The Open Source CFD Toolbox           |
-|  \\\\    /   O peration     | Version:  v2412                                 |
-|   \\\\  /    A nd           | Website:  www.openfoam.com                      |
-|    \\\\/     M anipulation  |                                                 |
-\\*---------------------------------------------------------------------------*/
-FoamFile
-{
-    version     2.0;
-    format      ascii;
-    class       volScalarField;
-    object      p;
-}
-// * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * //
-
-dimensions      [0 2 -2 0 0 0 0];
-
-internalField   uniform 0;
-
-boundaryField
-{
-    inlet
-    {
-        type            zeroGradient;
-    }
-
-    outlet
-    {
-        type            fixedValue;
-        value           uniform 0;
-    }
-
-    wall
-    {
-        type            zeroGradient;
-    }
-
-    frontAndBack
-    {
-        type            empty;
-    }
-}
-EOL
-
-# U (velocity)
-u_file="$case_dir/0/U"
-cat > "$u_file" << EOL
-/*--------------------------------*- C++ -*----------------------------------*\\
-| =========                 |                                                 |
-| \\\\      /  F ield         | OpenFOAM: The Open Source CFD Toolbox           |
-|  \\\\    /   O peration     | Version:  v2412                                 |
-|   \\\\  /    A nd           | Website:  www.openfoam.com                      |
-|    \\\\/     M anipulation  |                                                 |
-\\*---------------------------------------------------------------------------*/
-FoamFile
-{
-    version     2.0;
-    format      ascii;
-    class       volVectorField;
-    object      U;
-}
-// * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * //
-
-dimensions      [0 1 -1 0 0 0 0];
-
-internalField   uniform (0.4 0 0);
-
-boundaryField
-{
-    inlet
-    {
-        type            fixedValue;
-        value           uniform (0.4 0 0);
-    }
-
-    outlet
-    {
-        type            zeroGradient;
-    }
-
-    wall
-    {
-        type            noSlip;
-    }
-
-    frontAndBack
-    {
-        type            empty;
-    }
-}
-EOL
-
-# k (turbulent kinetic energy)
-k_file="$case_dir/0/k"
-cat > "$k_file" << EOL
-/*--------------------------------*- C++ -*----------------------------------*\\
-| =========                 |                                                 |
-| \\\\      /  F ield         | OpenFOAM: The Open Source CFD Toolbox           |
-|  \\\\    /   O peration     | Version:  v2412                                 |
-|   \\\\  /    A nd           | Website:  www.openfoam.com                      |
-|    \\\\/     M anipulation  |                                                 |
-\\*---------------------------------------------------------------------------*/
-FoamFile
-{
-    version     2.0;
-    format      ascii;
-    class       volScalarField;
-    object      k;
-}
-// * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * //
-
-dimensions      [0 2 -2 0 0 0 0];
-
-internalField   uniform 0.0006;
-
-boundaryField
-{
-    inlet
-    {
-        type            fixedValue;
-        value           \$internalField;
-    }
-
-    outlet
-    {
-        type            zeroGradient;
-    }
-
-    wall
-    {
-        type            kqRWallFunction;
-        value           \$internalField;
-    }
-
-    frontAndBack
-    {
-        type            empty;
-    }
-}
-EOL
-
-# omega (specific dissipation rate)
-omega_file="$case_dir/0/omega"
-cat > "$omega_file" << EOL
-/*--------------------------------*- C++ -*----------------------------------*\\
-| =========                 |                                                 |
-| \\\\      /  F ield         | OpenFOAM: The Open Source CFD Toolbox           |
-|  \\\\    /   O peration     | Version:  v2412                                 |
-|   \\\\  /    A nd           | Website:  www.openfoam.com                      |
-|    \\\\/     M anipulation  |                                                 |
-\\*---------------------------------------------------------------------------*/
-FoamFile
-{
-    version     2.0;
-    format      ascii;
-    class       volScalarField;
-    object      omega;
-}
-// * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * //
-
-dimensions      [0 0 -1 0 0 0 0];
-
-internalField   uniform 100;
-
-boundaryField
-{
-    inlet
-    {
-        type            fixedValue;
-        value           \$internalField;
-    }
-
-    outlet
-    {
-        type            zeroGradient;
-    }
-
-    wall
-    {
-        type            omegaWallFunction;
-        value           \$internalField;
-    }
-
-    frontAndBack
-    {
-        type            empty;
-    }
-}
-EOL
-
-# nut (turbulent viscosity) - THIS WAS MISSING BEFORE
-nut_file="$case_dir/0/nut"
-cat > "$nut_file" << EOL
-/*--------------------------------*- C++ -*----------------------------------*\\
-| =========                 |                                                 |
-| \\\\      /  F ield         | OpenFOAM: The Open Source CFD Toolbox           |
-|  \\\\    /   O peration     | Version:  v2412                                 |
-|   \\\\  /    A nd           | Website:  www.openfoam.com                      |
-|    \\\\/     M anipulation  |                                                 |
-\\*---------------------------------------------------------------------------*/
-FoamFile
-{
-    version     2.0;
-    format      ascii;
-    class       volScalarField;
-    object      nut;
-}
-// * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * //
-
-dimensions      [0 2 -1 0 0 0 0];
-
-internalField   uniform 0;
-
-boundaryField
-{
-    inlet
-    {
-        type            calculated;
-        value           \$internalField;
-    }
-
-    outlet
-    {
-        type            calculated;
-        value           \$internalField;
-    }
-
-    wall
-    {
-        type            nutkWallFunction;
-        value           \$internalField;
-    }
-
-    frontAndBack
-    {
-        type            empty;
-    }
-}
-EOL
+# Create constant directory files
+echo_info "Creating physical properties files..."
 
 # Create turbulenceProperties
-echo_info "Creating physical properties files..."
 turbulence_file="$case_dir/constant/turbulenceProperties"
 cat > "$turbulence_file" << EOL
 /*--------------------------------*- C++ -*----------------------------------*\\
@@ -761,34 +396,12 @@ EOL
 
 verify_file "$transport_file"
 
-# Check mesh
-echo "Checking mesh quality..."
-checkMesh -case $case_dir > $case_dir/checkMesh.log
+# Create initial field files (0 directory)
+echo_info "Creating initial conditions..."
 
-# Verify all required files exist before running the simulation
-echo_info "Verifying all required files exist..."
-required_files=(
-    "$case_dir/0/p"
-    "$case_dir/0/U"
-    "$case_dir/0/k"
-    "$case_dir/0/omega"
-    "$case_dir/0/nut"
-    "$case_dir/constant/turbulenceProperties"
-    "$case_dir/constant/transportProperties"
-    "$case_dir/system/controlDict"
-    "$case_dir/system/fvSchemes"
-    "$case_dir/system/fvSolution"
-)
-
-for file in "${required_files[@]}"; do
-    if [ ! -f "$file" ]; then
-        echo_error "Required file missing: $file"
-        echo_info "Trying to create this file now..."
-        
-        # Determine which file is missing and recreate it
-        case "$file" in
-            *p)
-                cat > "$file" << EOL
+# p (pressure)
+p_file="$case_dir/0/p"
+cat > "$p_file" << EOL
 /*--------------------------------*- C++ -*----------------------------------*\\
 | =========                 |                                                 |
 | \\\\      /  F ield         | OpenFOAM: The Open Source CFD Toolbox           |
@@ -813,18 +426,17 @@ boundaryField
 {
     inlet
     {
-        type            zeroGradient;
+        // inlet settings
     }
 
     outlet
     {
-        type            fixedValue;
-        value           uniform 0;
+        // outlet settings 
     }
 
     wall
     {
-        type            zeroGradient;
+        // wall settings
     }
 
     frontAndBack
@@ -833,31 +445,511 @@ boundaryField
     }
 }
 EOL
-                ;;
-            *U)
-                # Similar blocks for each required file
-                # ... (other file recreation logic)
-                ;;
-        esac
-        
-        if [ -f "$file" ]; then
-            echo_success "Created missing file: $file"
-        else
-            echo_error "Failed to create file: $file"
-            exit 1
-        fi
+
+verify_file "$p_file"
+
+# U (velocity)
+u_file="$case_dir/0/U"
+cat > "$u_file" << EOL
+/*--------------------------------*- C++ -*----------------------------------*\\
+| =========                 |                                                 |
+| \\\\      /  F ield         | OpenFOAM: The Open Source CFD Toolbox           |
+|  \\\\    /   O peration     | Version:  v2412                                 |
+|   \\\\  /    A nd           | Website:  www.openfoam.com                      |
+|    \\\\/     M anipulation  |                                                 |
+\\*---------------------------------------------------------------------------*/
+FoamFile
+{
+    version     2.0;
+    format      ascii;
+    class       volVectorField;
+    object      U;
+}
+// * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * //
+
+dimensions      [0 1 -1 0 0 0 0];
+
+internalField   uniform (0.4 0 0);
+
+boundaryField
+{
+    inlet
+    {
+        // inlet settings
+    }
+
+    outlet
+    {
+        // outlet settings 
+    }
+
+    wall
+    {
+        // wall settings
+    }
+
+    frontAndBack
+    {
+        type            empty;
+    }
+}
+EOL
+
+verify_file "$u_file"
+
+# k (turbulent kinetic energy)
+k_file="$case_dir/0/k"
+cat > "$k_file" << EOL
+/*--------------------------------*- C++ -*----------------------------------*\\
+| =========                 |                                                 |
+| \\\\      /  F ield         | OpenFOAM: The Open Source CFD Toolbox           |
+|  \\\\    /   O peration     | Version:  v2412                                 |
+|   \\\\  /    A nd           | Website:  www.openfoam.com                      |
+|    \\\\/     M anipulation  |                                                 |
+\\*---------------------------------------------------------------------------*/
+FoamFile
+{
+    version     2.0;
+    format      ascii;
+    class       volScalarField;
+    object      k;
+}
+// * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * //
+
+dimensions      [0 2 -2 0 0 0 0];
+
+internalField   uniform 0.0006;
+
+boundaryField
+{
+    inlet
+    {
+        // inlet settings
+    }
+
+    outlet
+    {
+        // outlet settings 
+    }
+
+    wall
+    {
+        // wall settings
+    }
+
+    frontAndBack
+    {
+        type            empty;
+    }
+}
+EOL
+
+verify_file "$k_file"
+
+# omega (specific dissipation rate)
+omega_file="$case_dir/0/omega"
+cat > "$omega_file" << EOL
+/*--------------------------------*- C++ -*----------------------------------*\\
+| =========                 |                                                 |
+| \\\\      /  F ield         | OpenFOAM: The Open Source CFD Toolbox           |
+|  \\\\    /   O peration     | Version:  v2412                                 |
+|   \\\\  /    A nd           | Website:  www.openfoam.com                      |
+|    \\\\/     M anipulation  |                                                 |
+\\*---------------------------------------------------------------------------*/
+FoamFile
+{
+    version     2.0;
+    format      ascii;
+    class       volScalarField;
+    object      omega;
+}
+// * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * //
+
+dimensions      [0 0 -1 0 0 0 0];
+
+internalField   uniform 100;
+
+boundaryField
+{
+    inlet
+    {
+        // inlet settings
+    }
+
+    outlet
+    {
+        // outlet settings 
+    }
+
+    wall
+    {
+        // wall settings
+    }
+
+    frontAndBack
+    {
+        type            empty;
+    }
+}
+EOL
+
+verify_file "$omega_file"
+
+# nut (turbulent viscosity)
+nut_file="$case_dir/0/nut"
+cat > "$nut_file" << EOL
+/*--------------------------------*- C++ -*----------------------------------*\\
+| =========                 |                                                 |
+| \\\\      /  F ield         | OpenFOAM: The Open Source CFD Toolbox           |
+|  \\\\    /   O peration     | Version:  v2412                                 |
+|   \\\\  /    A nd           | Website:  www.openfoam.com                      |
+|    \\\\/     M anipulation  |                                                 |
+\\*---------------------------------------------------------------------------*/
+FoamFile
+{
+    version     2.0;
+    format      ascii;
+    class       volScalarField;
+    object      nut;
+}
+// * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * //
+
+dimensions      [0 2 -1 0 0 0 0];
+
+internalField   uniform 0;
+
+boundaryField
+{
+    inlet
+    {
+        // inlet settings
+    }
+
+    outlet
+    {
+        // outlet settings 
+    }
+
+    wall
+    {
+        // wall settings
+    }
+
+    frontAndBack
+    {
+        type            empty;
+    }
+}
+EOL
+
+verify_file "$nut_file"
+
+# STEP 2: CREATE GEOMETRY AND MESH
+
+# Create blockMeshDict for the aorta with stenosis
+echo_info "Creating blockMesh dictionary..."
+block_mesh_file="$case_dir/system/blockMeshDict"
+cat > "$block_mesh_file" << EOL
+/*--------------------------------*- C++ -*----------------------------------*\
+| =========                 |                                                 |
+| \\      /  F ield         | OpenFOAM: The Open Source CFD Toolbox           |
+|  \\    /   O peration     | Version:  v2412                                 |
+|   \\  /    A nd           | Website:  www.openfoam.com                      |
+|    \\/     M anipulation  |                                                 |
+\*---------------------------------------------------------------------------*/
+FoamFile
+{
+    version     2.0;
+    format      ascii;
+    class       dictionary;
+    object      blockMeshDict;
+}
+// * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * //
+
+// Convert mm to m
+scale 0.001;
+
+// Stenosis parameters
+radius           12.5;    // Aorta radius in mm
+length           150;     // Total length in mm
+stenosisLevel    $stenosis_level;   // Level of stenosis (0-1)
+stenosisLength   20;      // Length of stenotic region in mm
+stenosisPos      75;      // Position of stenosis center
+
+// Calculate narrowed radius at stenosis
+stenosisRadius   #calc "radius * (1.0 - stenosisLevel)";
+
+// Number of cells
+nCellsLength     100;     // Number of cells along length
+nCellsRadial     15;      // Number of cells in radial direction
+nCellsThickness  1;       // One cell in z-direction (2D simulation)
+
+// Define z-thickness (small value for quasi-2D)
+zThickness       1;
+
+// Define positions
+xMin             0;
+xInlet           #calc "stenosisPos - stenosisLength/2";
+xStenosis        stenosisPos;
+xOutlet          #calc "stenosisPos + stenosisLength/2";
+xMax             length;
+
+// Proportional cell distributions
+firstLength      #calc "(stenosisPos - stenosisLength/2) / length";
+stenosisSection  #calc "stenosisLength / length";
+lastLength       #calc "1.0 - firstLength - stenosisSection";
+
+vertices
+(
+    // Bottom face, inlet to stenosis start
+    (0        -radius          0)          // 0
+    (xInlet   -radius          0)          // 1
+    (xInlet   -radius          zThickness) // 2
+    (0        -radius          zThickness) // 3
+    
+    // Bottom face at stenosis
+    (xStenosis -stenosisRadius 0)          // 4
+    (xStenosis -stenosisRadius zThickness) // 5
+    
+    // Bottom face, stenosis to outlet
+    (xOutlet  -radius          0)          // 6
+    (xOutlet  -radius          zThickness) // 7
+    (xMax     -radius          0)          // 8
+    (xMax     -radius          zThickness) // 9
+    
+    // Top face, inlet to stenosis start
+    (0        radius           0)          // 10
+    (xInlet   radius           0)          // 11
+    (xInlet   radius           zThickness) // 12
+    (0        radius           zThickness) // 13
+    
+    // Top face at stenosis
+    (xStenosis stenosisRadius  0)          // 14
+    (xStenosis stenosisRadius  zThickness) // 15
+    
+    // Top face, stenosis to outlet
+    (xOutlet  radius           0)          // 16
+    (xOutlet  radius           zThickness) // 17
+    (xMax     radius           0)          // 18
+    (xMax     radius           zThickness) // 19
+);
+
+// Calculate cell distribution
+nCellsFirst      #calc "round($firstLength * $nCellsLength)";
+nCellsStenosis   #calc "round($stenosisSection * $nCellsLength)";
+nCellsLast       #calc "round($lastLength * $nCellsLength)";
+
+// Adjust if rounding created too few/many cells
+nCellsCheck      #calc "$nCellsFirst + $nCellsStenosis + $nCellsLast";
+nCellsFirst      #calc "$nCellsFirst + ($nCellsLength - $nCellsCheck)";
+
+blocks
+(
+    // Block 0: Inlet to stenosis start
+    hex (0 1 11 10 3 2 12 13)
+    ($nCellsFirst $nCellsRadial $nCellsThickness)
+    simpleGrading (1 1 1)
+    
+    // Block 1: Stenosis section
+    hex (1 4 14 11 2 5 15 12)
+    ($nCellsStenosis $nCellsRadial $nCellsThickness)
+    simpleGrading (1 1 1)
+    
+    // Block 2: Stenosis to outlet
+    hex (4 6 16 14 5 7 17 15)
+    ($nCellsStenosis $nCellsRadial $nCellsThickness)
+    simpleGrading (1 1 1)
+    
+    // Block 3: Outlet section
+    hex (6 8 18 16 7 9 19 17)
+    ($nCellsLast $nCellsRadial $nCellsThickness)
+    simpleGrading (1 1 1)
+);
+
+edges
+(
+);
+
+boundary
+(
+    inlet
+    {
+        type patch;
+        faces
+        (
+            (0 10 13 3)
+        );
+    }
+    outlet
+    {
+        type patch;
+        faces
+        (
+            (8 9 19 18)
+        );
+    }
+    wall
+    {
+        type wall;
+        faces
+        (
+            // Bottom wall
+            (0 1 2 3)
+            (1 4 5 2)
+            (4 6 7 5)
+            (6 8 9 7)
+            
+            // Top wall
+            (10 13 12 11)
+            (11 12 15 14)
+            (14 15 17 16)
+            (16 17 19 18)
+        );
+    }
+    frontAndBack
+    {
+        type empty;
+        faces
+        (
+            // Front face (z=0)
+            (0 1 11 10)
+            (1 4 14 11)
+            (4 6 16 14)
+            (6 8 18 16)
+            
+            // Back face (z=thickness)
+            (3 13 12 2)
+            (2 12 15 5)
+            (5 15 17 7)
+            (7 17 19 9)
+        );
+    }
+);
+
+mergePatchPairs
+(
+);
+
+// ************************************************************************* //
+EOL
+
+verify_file "$block_mesh_file"
+
+# Replace the Gmsh call with blockMesh
+echo_info "Generating mesh with blockMesh..."
+blockMesh -case "$case_dir" > "$case_dir/blockMesh.log" 2>&1
+
+# Exit if blockMesh failed
+if [ $? -ne 0 ]; then
+    echo_error "blockMesh failed to generate the mesh. Check log for details."
+    cat "$case_dir/blockMesh.log"
+    exit 1
+fi
+# Create decomposeParDict for parallel execution (optional)
+decompose_file="$case_dir/system/decomposeParDict"
+cat > "$decompose_file" << EOL
+/*--------------------------------*- C++ -*----------------------------------*\\
+| =========                 |                                                 |
+| \\\\      /  F ield         | OpenFOAM: The Open Source CFD Toolbox           |
+|  \\\\    /   O peration     | Version:  v2412                                 |
+|   \\\\  /    A nd           | Website:  www.openfoam.com                      |
+|    \\\\/     M anipulation  |                                                 |
+\\*---------------------------------------------------------------------------*/
+FoamFile
+{
+    version     2.0;
+    format      ascii;
+    class       dictionary;
+    object      decomposeParDict;
+}
+// * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * //
+
+numberOfSubdomains 4;  // Adjust based on available cores
+
+method          scotch;  // No geometric info needed
+
+// ************************************************************************* //
+EOL
+
+verify_file "$decompose_file"
+
+# STEP 3: GENERATE MESH AND RUN SIMULATION
+echo_info "Generating 2D mesh with gmsh..."
+gmsh -2 "$case_dir/aorta.geo" -o "$case_dir/aorta.msh"
+
+# Exit if gmsh failed
+if [ $? -ne 0 ]; then
+    echo_error "Gmsh failed to generate the mesh. Exiting."
+    exit 1
+fi
+
+echo_info "Converting mesh to OpenFOAM format..."
+gmshToFoam "$case_dir/aorta.msh" -case "$case_dir"
+
+# Exit if conversion failed
+if [ $? -ne 0 ]; then
+    echo_error "gmshToFoam failed to convert the mesh. Exiting."
+    exit 1
+fi
+
+# Fix boundary types
+echo_info "Fixing mesh boundary conditions..."
+boundaryFile="$case_dir/constant/polyMesh/boundary"
+
+# Check if boundary file exists
+if [ ! -f "$boundaryFile" ]; then
+    echo_error "Boundary file not found at $boundaryFile"
+    echo_info "This may indicate an issue with the mesh generation or conversion."
+    echo_info "Check the gmsh and gmshToFoam output for errors."
+    ls -la "$case_dir/constant/polyMesh/"
+    exit 1
+fi
+
+# Create a backup of the boundary file
+cp "$boundaryFile" "${boundaryFile}.backup"
+
+
+# Verify files exist before running
+echo_info "Verifying OpenFOAM case setup before running..."
+required_files=(
+    "$case_dir/0/p"
+    "$case_dir/0/U"
+    "$case_dir/0/k"
+    "$case_dir/0/omega"
+    "$case_dir/0/nut"
+    "$case_dir/constant/turbulenceProperties"
+    "$case_dir/constant/transportProperties"
+    "$case_dir/system/controlDict"
+    "$case_dir/system/fvSchemes"
+    "$case_dir/system/fvSolution"
+    "$case_dir/constant/polyMesh/boundary"
+)
+
+for file in "${required_files[@]}"; do
+    if [ ! -f "$file" ]; then
+        echo_error "Required file missing: $file"
+        exit 1
+    else
+        echo_info "Verified: $file exists"
     fi
 done
 
+# Check mesh
+echo_info "Checking mesh quality..."
+checkMesh -case "$case_dir" > "$case_dir/checkMesh.log" 2>&1
+
 # Run the simulation
 echo_info "Running OpenFOAM simulation for $case_name stenosis..."
-simpleFoam -case $case_dir > $case_dir/simpleFoam.log 2>&1
+simpleFoam -case "$case_dir" > "$case_dir/simpleFoam.log" 2>&1
 
 # Check if simulation completed successfully
 if [ $? -eq 0 ]; then
-    echo "✅ Completed simulation for $case_name stenosis"
-    echo "Results can be found in directory: $case_dir"
-    echo "Visualize results using: paraFoam -case $case_dir"
+    echo_success "Completed simulation for $case_name stenosis"
+    echo_info "Results can be found in directory: $case_dir"
+    echo_info "Visualize results using: paraFoam -case $case_dir"
 else
-    echo "⚠️ Simulation may have encountered issues. Check log file: $case_dir/simpleFoam.log"
+    echo_warning "Simulation may have encountered issues. Check log file: $case_dir/simpleFoam.log"
+    # Print the last few lines of the log to help diagnose
+    echo_info "Last 10 lines of the log file:"
+    tail -n 10 "$case_dir/simpleFoam.log"
 fi
