@@ -1,0 +1,68 @@
+/*--------------------------------*- C++ -*----------------------------------*\
+| =========                 |                                                 |
+| \\      /  F ield         | OpenFOAM: The Open Source CFD Toolbox           |
+|  \\    /   O peration     | Version:  v2412                                 |
+|   \\  /    A nd           | Website:  www.openfoam.com                      |
+|    \\/     M anipulation  |                                                 |
+\*---------------------------------------------------------------------------*/
+FoamFile
+{
+    version     2.0;
+    format      ascii;
+    class       dictionary;
+    object      fvSolution;
+}
+// * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * //
+
+solvers
+{
+    // Solver settings optimized for convergence in stenotic flow
+    p
+    {
+        solver          GAMG;
+        smoother        GaussSeidel;
+        tolerance       1e-7;
+        relTol          0.01;
+    }
+
+    "(U|k|omega)"
+    {
+        solver          smoothSolver;
+        smoother        GaussSeidel;
+        tolerance       1e-7;
+        relTol          0.1;
+        nSweeps         1;
+    }
+
+    "(U|k|omega)Final"
+    {
+        $U;
+        relTol          0;
+    }
+}
+
+// SIMPLE algorithm controls
+SIMPLE
+{
+    nNonOrthogonalCorrectors 0;
+    consistent      yes;  // Enables more robust pressure-velocity coupling
+
+    residualControl
+    {
+        p               1e-4;
+        U               1e-4;
+        "(k|omega)"     1e-4;
+    }
+}
+
+// Relaxation factors to improve stability
+relaxationFactors
+{
+    equations
+    {
+        U               0.7;  // Lower values for more stable but slower convergence
+        ".*"            0.5;
+    }
+}
+
+// ************************************************************************* //

@@ -1,0 +1,107 @@
+/*--------------------------------*- C++ -*----------------------------------*\
+| =========                 |                                                 |
+| \\      /  F ield         | OpenFOAM: The Open Source CFD Toolbox           |
+|  \\    /   O peration     | Version:  v2412                                 |
+|   \\  /    A nd           | Website:  www.openfoam.com                      |
+|    \\/     M anipulation  |                                                 |
+\*---------------------------------------------------------------------------*/
+FoamFile
+{
+    version     2.0;
+    format      ascii;
+    class       dictionary;
+    object      controlDict;
+}
+// * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * //
+
+// simpleFoam: Steady-state incompressible flow solver
+application     simpleFoam;
+
+startFrom       startTime;
+
+startTime       0;
+
+stopAt          endTime;
+
+endTime         5000;  // Iterations for steady-state solver
+
+deltaT          1;     // Time step for steady solver is iteration step
+
+writeControl    timeStep;
+
+writeInterval   500;   // Write results every 500 iterations
+
+purgeWrite      3;     // Keep only the 3 most recent time directories
+
+writeFormat     ascii;
+
+writePrecision  8;
+
+writeCompression off;
+
+timeFormat      general;
+
+timePrecision   8;
+
+runTimeModifiable true;
+
+// Function objects for post-processing
+functions
+{
+    // Calculate pressure coefficient
+    pressure
+    {
+        type            pressure;
+        libs            (fieldFunctionObjects);
+        writeControl    writeTime;
+        result          Cp;
+        mode            staticCoeff;
+        rho             rhoInf;
+        rhoInf          1060;  // Blood density
+        U               UInf;
+        UInf            (0.4 0 0);  // Reference velocity
+        pInf            0;
+    }
+
+    // Calculate wall shear stress
+    wallShearStress
+    {
+        type            wallShearStress;
+        libs            (fieldFunctionObjects);
+        writeFields     yes;
+        writeControl    writeTime;
+        patches         (wall);
+    }
+
+    // Calculate y+ to check mesh quality near walls
+    yPlus
+    {
+        type            yPlus;
+        libs            (fieldFunctionObjects);
+        writeFields     yes;
+        writeControl    writeTime;
+    }
+
+    // Calculate forces on the wall (useful for plaque rupture studies)
+    forces
+    {
+        type            forces;
+        libs            (forces);
+        writeControl    writeTime;
+        patches         (wall);
+        rho             rhoInf;
+        rhoInf          1060;
+        CofR            (0 0 0);
+        log             yes;
+    }
+
+    // Write solver residuals for monitoring convergence
+    residuals
+    {
+        type            solverInfo;
+        libs            (utilityFunctionObjects);
+        fields          (".*");
+    }
+}
+
+// ************************************************************************* //
