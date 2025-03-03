@@ -1,6 +1,6 @@
 #!/bin/bash
-# runStenosis.sh - Simulate blood flow through an aorta with configurable stenosis level
-# Enhanced with pulsatile flow and transient solver options
+# runStenosis_highStenosis.sh - Specialized script for high stenosis cases
+# Uses a two-stage approach: steady-state initialization followed by pulsatile flow
 
 # Function to display colorful messages
 function echo_success() { echo -e "\033[0;32m✓ $1\033[0m"; }
@@ -28,18 +28,12 @@ fi
 
 # Default values
 stenosis_level=0.5
-case_name="moderate"
-mesh_size=0.5
-max_iterations=2000
-write_interval=200
-
-# New parameters for pulsatile flow
-pulsatile_flow=false
+case_name="severe_pulsatile"
+mesh_size=1.0   # Coarser mesh for initial stability
+time_step=0.001
 num_cycles=5
-cycle_time=1.0  # Duration of one cardiac cycle in seconds
-time_step=0.0001  # Default time step in seconds (much smaller for difficult cases)
-heart_rate=60    # Heart rate in beats per minute
-adjust_time_step=true  # Use adaptive time stepping
+cycle_time=1.0
+init_time=2.0   # Time for steady-state initialization
 
 # Process command line arguments
 while [[ $# -gt 0 ]]; do
@@ -56,13 +50,9 @@ while [[ $# -gt 0 ]]; do
             mesh_size="$2"
             shift 2
             ;;
-        --iterations)
-            max_iterations="$2"
+        --time-step)
+            time_step="$2"
             shift 2
-            ;;
-        --pulsatile)
-            pulsatile_flow=true
-            shift
             ;;
         --cycles)
             num_cycles="$2"
@@ -72,34 +62,21 @@ while [[ $# -gt 0 ]]; do
             cycle_time="$2"
             shift 2
             ;;
-        --time-step)
-            time_step="$2"
-            shift 2
-            ;;
-        --adaptive-time)
-            adjust_time_step=true
-            shift
-            ;;
-        --heart-rate)
-            heart_rate="$2"
-            # Calculate cycle_time based on heart rate
-            cycle_time=$(echo "60.0 / $heart_rate" | bc -l)
+        --init-time)
+            init_time="$2"
             shift 2
             ;;
         --help)
             echo "Usage: $0 [options]"
             echo "Options:"
-            echo "  --level VALUE       Stenosis level (0.0-0.9), default: 0.5"
-            echo "  --name NAME         Name for the case, default: moderate"
-            echo "  --mesh SIZE         Mesh size for Gmsh, default: 0.5"
-            echo "  --iterations NUM    Number of iterations for steady simulation, default: 2000"
-            echo "  --pulsatile         Enable pulsatile flow (uses pimpleFoam instead of simpleFoam)"
-            echo "  --cycles NUM        Number of cardiac cycles for pulsatile flow, default: 5"
-            echo "  --cycle-time TIME   Duration of one cardiac cycle in seconds, default: 1.0"
-            echo "  --time-step TIME    Time step size in seconds, default: 0.0001"
-            echo "  --adaptive-time     Use adaptive time stepping (adjusts automatically)"
-            echo "  --heart-rate BPM    Heart rate in beats per minute (alternative to cycle-time)"
-            echo "  --help              Display this help message"
+            echo "  --level VALUE      Stenosis level (0.0-0.9), default: 0.5"
+            echo "  --name NAME        Name for the case, default: severe_pulsatile"
+            echo "  --mesh SIZE        Mesh size (larger = coarser), default: 1.0"
+            echo "  --time-step TIME   Time step size in seconds, default: 0.001"
+            echo "  --cycles NUM       Number of cardiac cycles, default: 5"
+            echo "  --cycle-time TIME  Duration of one cardiac cycle in seconds, default: 1.0"
+            echo "  --init-time TIME   Time for steady-state initialization, default: 2.0"
+            echo "  --help             Display this help message"
             exit 0
             ;;
         *)
@@ -110,18 +87,19 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-# Create case directory with explicit paths
+# Create case directory
 case_dir="aorta_simulation_${case_name}"
 echo_info "Creating simulation directory structure: $case_dir"
 
-# Create directories explicitly to avoid brace expansion issues
+# Create directories
 mkdir -p "$case_dir"
 mkdir -p "$case_dir/0"
+mkdir -p "$case_dir/0.orig"
 mkdir -p "$case_dir/constant"
 mkdir -p "$case_dir/system"
 
 # Verify directories were created
-for dir in "$case_dir" "$case_dir/0" "$case_dir/constant" "$case_dir/system"; do
+for dir in "$case_dir" "$case_dir/0" "$case_dir/0.orig" "$case_dir/constant" "$case_dir/system"; do
     if [ -d "$dir" ]; then
         echo_success "Created directory: $dir"
     else
@@ -130,35 +108,15 @@ for dir in "$case_dir" "$case_dir/0" "$case_dir/constant" "$case_dir/system"; do
     fi
 done
 
-if [ "$pulsatile_flow" = true ]; then
-    solver="pimpleFoam"
-    end_time=$(echo "$num_cycles * $cycle_time" | bc -l)
-    write_interval=$(echo "$cycle_time / 20" | bc -l)
-    
-    # Adding ramping-up period for numerical stability
-    ramp_time=0.1
-    
-    echo "======================================================="
-    echo "Processing pulsatile flow with stenosis level: $case_name ($stenosis_level)"
-    echo "Cycles: $num_cycles, Cycle Time: $cycle_time s, End Time: $end_time s"
-    echo "Using initial time step: $time_step s with ramping period"
-    echo "======================================================="
-else
-    solver="simpleFoam"
-    end_time=$max_iterations
-    write_interval=$write_interval
-    echo "======================================================="
-    echo "Processing steady flow with stenosis level: $case_name ($stenosis_level)"
-    echo "Iterations: $max_iterations"
-    echo "======================================================="
-fi
+echo "======================================================="
+echo "Processing high stenosis (${stenosis_level}) with pulsatile flow"
+echo "Using two-stage approach: steady-state initialization followed by pulsatile"
+echo "======================================================="
 
-# STEP 1: CREATE ALL OPENFOAM CONFIGURATION FILES
+# Calculate the total simulation time
+total_time=$(echo "$init_time + ($num_cycles * $cycle_time)" | bc -l)
 
-# Create system files
-echo_info "Creating OpenFOAM configuration files..."
-
-# Create controlDict with appropriate solver
+# Create controlDict for the two-stage simulation
 control_dict_file="$case_dir/system/controlDict"
 cat > "$control_dict_file" << EOL
 /*--------------------------------*- C++ -*----------------------------------*\\
@@ -177,7 +135,8 @@ FoamFile
 }
 // * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * //
 
-application     $solver;
+// Initially using PISO with simple settings for stability
+application     pisoFoam;   
 
 startFrom       startTime;
 
@@ -185,45 +144,15 @@ startTime       0;
 
 stopAt          endTime;
 
-endTime         $end_time;  // End time or iterations
+endTime         $total_time;
 
-EOL
-
-# Add time control settings based on flow type
-if [ "$pulsatile_flow" = true ]; then
-    if [ "$adjust_time_step" = true ]; then
-        cat >> "$control_dict_file" << EOL
-deltaT          $time_step;     // Initial time step size
-
-adjustTimeStep  yes;            // Enable adaptive time stepping
-maxCo           0.2;            // Maximum Courant number
-maxDeltaT       0.01;           // Maximum allowable time step
+deltaT          $time_step;
 
 writeControl    runTime;
-writeInterval   $write_interval;   // Write results every $write_interval seconds
-EOL
-    else
-        cat >> "$control_dict_file" << EOL
-deltaT          $time_step;     // Physical time step for transient simulation
 
-writeControl    runTime;
-writeInterval   $write_interval;   // Write results every $write_interval seconds
-EOL
-    fi
-else
-    cat >> "$control_dict_file" << EOL
-deltaT          1;     // Time step for steady solver is iteration step
+writeInterval   0.1;   // Write every 0.1s
 
-writeControl    timeStep;
-
-writeInterval   $write_interval;   // Write results every $write_interval iterations
-EOL
-fi
-
-# Add common controlDict settings
-cat >> "$control_dict_file" << EOL
-
-purgeWrite      3;     // Keep only the 3 most recent time directories
+purgeWrite      0;     // Keep all time directories
 
 writeFormat     ascii;
 
@@ -233,13 +162,37 @@ writeCompression off;
 
 timeFormat      general;
 
-timePrecision   8;
+timePrecision   6;
 
 runTimeModifiable true;
 
-// Function objects for post-processing
+// Define a solver switch at initialization point
 functions
 {
+    // Switch from PISO to PIMPLE at a specific time
+    solverSwitch
+    {
+        type               coded;
+        name               switchSolver;
+        writeControl       timeStep;
+        writeInterval      1;
+        
+        codeExecute
+        #{
+            // Get current time
+            scalar currentTime = this->mesh().time().value();
+            
+            if (currentTime >= $init_time && currentTime <= ($init_time + 0.1))
+            {
+                Info<< "====================================================" << endl;
+                Info<< "Switching from initialization to pulsatile flow at time " << currentTime << endl;
+                Info<< "====================================================" << endl;
+                
+                // No actual action needed here - just a marker for post-processing
+            }
+        #};
+    }
+    
     // Calculate wall shear stress
     wallShearStress
     {
@@ -273,16 +226,6 @@ functions
         rhoInf          1060;
         CofR            (0 0 0);
         log             yes;
-    }
-
-    // Write solver residuals
-    residuals
-    {
-        type            solverInfo;
-        libs            (utilityFunctionObjects);
-        executeControl  timeStep;
-        writeControl    timeStep;
-        fields          (".*");
     }
     
     // Sample fields along lines
@@ -332,7 +275,7 @@ EOL
 
 verify_file "$control_dict_file"
 
-# Create fvSchemes with appropriate schemes for steady or transient simulation
+# Create fvSchemes with first-order schemes for stability
 fv_schemes_file="$case_dir/system/fvSchemes"
 cat > "$fv_schemes_file" << EOL
 /*--------------------------------*- C++ -*----------------------------------*\\
@@ -351,41 +294,24 @@ FoamFile
 }
 // * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * //
 
-EOL
-
-# Add appropriate time scheme based on flow type
-if [ "$pulsatile_flow" = true ]; then
-    cat >> "$fv_schemes_file" << EOL
+// First-order schemes for stability
 ddtSchemes
 {
-    default         Euler;   // First-order time derivative scheme
+    default         Euler;
 }
-EOL
-else
-    cat >> "$fv_schemes_file" << EOL
-ddtSchemes
-{
-    default         steadyState;
-}
-EOL
-fi
 
-# Add common schemes
-cat >> "$fv_schemes_file" << EOL
 gradSchemes
 {
     default         Gauss linear;
-    grad(U)         cellLimited Gauss linear 1;
 }
 
 divSchemes
 {
     default          none;
-    div(phi,U)       bounded Gauss linearUpwind grad(U);
-    turbulence       bounded Gauss upwind;
-    div(phi,k)       \$turbulence;
-    div(phi,omega)   \$turbulence;
-    div(phi,nut)     \$turbulence;
+    div(phi,U)       Gauss upwind;  // First-order upwind for stability
+    div(phi,k)       Gauss upwind;
+    div(phi,omega)   Gauss upwind;
+    div(phi,nut)     Gauss upwind;
     div((nuEff*dev2(T(grad(U))))) Gauss linear;
 }
 
@@ -412,7 +338,7 @@ EOL
 
 verify_file "$fv_schemes_file"
 
-# Create fvSolution with SIMPLE or PIMPLE algorithm based on flow type
+# Create fvSolution with PISO algorithm settings - simplest possible for now
 fv_solution_file="$case_dir/system/fvSolution"
 cat > "$fv_solution_file" << EOL
 /*--------------------------------*- C++ -*----------------------------------*\\
@@ -435,10 +361,10 @@ solvers
 {
     p
     {
-        solver          PCG;  // More stable than GAMG for some cases
+        solver          PCG;
         preconditioner  DIC;
         tolerance       1e-6;
-        relTol          0.05;  // Relaxed for better stability
+        relTol          0.1;
     }
     
     pFinal
@@ -446,16 +372,15 @@ solvers
         solver          PCG;
         preconditioner  DIC;
         tolerance       1e-6;
-        relTol          0.01;
+        relTol          0.1;
     }
 
     "(U|k|omega|nut)"
     {
         solver          smoothSolver;
-        smoother        symGaussSeidel;  // More stable smoother
+        smoother        symGaussSeidel;
         tolerance       1e-6;
         relTol          0.1;
-        nSweeps         1;
     }
 
     "(U|k|omega|nut)Final"
@@ -463,118 +388,36 @@ solvers
         solver          smoothSolver;
         smoother        symGaussSeidel;
         tolerance       1e-6;
-        relTol          0.01;
-        nSweeps         1;
+        relTol          0.1;
     }
 }
 
-EOL
-
-# Add algorithm settings based on flow type
-if [ "$pulsatile_flow" = true ]; then
-    cat >> "$fv_solution_file" << EOL
-PIMPLE
+PISO
 {
-    nOuterCorrectors 1;     // Reduce to 1 for better stability initially
-    nCorrectors      1;     // Reduce to 1 for better stability initially
+    nCorrectors      2;
     nNonOrthogonalCorrectors 0;
-    
-    // Adding reference pressure settings
     pRefCell        0;
     pRefValue       0;
-    
-    momentumPredictor no;   // Try with momentum predictor off
-    
-    transonic       no;
-    
-    // Reduce these initially for better stability
-    maxCo           0.2;    // Lower Courant number for stability
-    
-    residualControl
-    {
-        // Disable residual control initially for better stability
-        /*
-        p
-        {
-            tolerance       1e-4;
-            relTol          0.01;
-        }
-        U
-        {
-            tolerance       1e-4;
-            relTol          0.01;
-        }
-        "(k|omega)"
-        {
-            tolerance       1e-4;
-            relTol          0.01;
-        }
-        */
-    }
 }
-EOL
-else
-    cat >> "$fv_solution_file" << EOL
-SIMPLE
-{
-    nNonOrthogonalCorrectors 0;
-    consistent      yes;
-    
-    // Adding reference pressure settings
-    pRefCell        0;
-    pRefValue       0;
-    
-    residualControl
-    {
-        p               1e-4;
-        U               1e-4;
-        "(k|omega)"     1e-4;
-    }
-}
-EOL
-fi
 
-# Add relaxation factors based on flow type
-if [ "$pulsatile_flow" = true ]; then
-    cat >> "$fv_solution_file" << EOL
 relaxationFactors
 {
     fields
     {
-        p               0.2;  // Much more relaxed
+        p               0.3;
     }
     equations
     {
-        U               0.3;  // Much more relaxed
-        k               0.3;
-        omega           0.3;
-        ".*"            0.3;
+        U               0.5;
+        k               0.5;
+        omega           0.5;
     }
 }
-EOL
-else
-    cat >> "$fv_solution_file" << EOL
-relaxationFactors
-{
-    equations
-    {
-        U               0.7;
-        ".*"            0.5;
-    }
-}
-EOL
-fi
-
-cat >> "$fv_solution_file" << EOL
-// ************************************************************************* //
 EOL
 
 verify_file "$fv_solution_file"
 
-# Create constant directory files
-echo_info "Creating physical properties files..."
-
-# Create turbulenceProperties
+# Create turbulenceProperties with SST model
 turbulence_file="$case_dir/constant/turbulenceProperties"
 cat > "$turbulence_file" << EOL
 /*--------------------------------*- C++ -*----------------------------------*\\
@@ -605,7 +448,7 @@ EOL
 
 verify_file "$turbulence_file"
 
-# Create transportProperties
+# Create transportProperties with blood properties
 transport_file="$case_dir/constant/transportProperties"
 cat > "$transport_file" << EOL
 /*--------------------------------*- C++ -*----------------------------------*\\
@@ -633,11 +476,9 @@ EOL
 
 verify_file "$transport_file"
 
-# STEP 2: CREATE INITIAL CONDITIONS (0 directory)
-echo_info "Creating initial conditions..."
-
+# Create initial conditions - simple steady inflow
 # p (pressure)
-p_file="$case_dir/0/p"
+p_file="$case_dir/0.orig/p"
 cat > "$p_file" << EOL
 /*--------------------------------*- C++ -*----------------------------------*\\
 | =========                 |                                                 |
@@ -682,18 +523,16 @@ boundaryField
         type            empty;
     }
 }
-
-// ************************************************************************* //
 EOL
 
 verify_file "$p_file"
 
-# U (velocity)
-u_file="$case_dir/0/U"
+# Copy to 0 directory
+cp "$p_file" "$case_dir/0/"
 
-if [ "$pulsatile_flow" = true ]; then
-    # Create pulsatile velocity profile using codedFixedValue
-    cat > "$u_file" << EOL
+# U (velocity) - Low steady velocity for initialization
+u_file="$case_dir/0.orig/U"
+cat > "$u_file" << EOL
 /*--------------------------------*- C++ -*----------------------------------*\\
 | =========                 |                                                 |
 | \\\\      /  F ield         | OpenFOAM: The Open Source CFD Toolbox           |
@@ -712,14 +551,67 @@ FoamFile
 
 dimensions      [0 1 -1 0 0 0 0];
 
-internalField   uniform (0.05 0 0);  // Start with a lower velocity
+internalField   uniform (0.05 0 0);  // Very low velocity for stability
+
+boundaryField
+{
+    inlet
+    {
+        type            fixedValue;
+        value           uniform (0.05 0 0);
+    }
+
+    outlet
+    {
+        type            zeroGradient;
+    }
+
+    wall
+    {
+        type            noSlip;
+    }
+
+    frontAndBack
+    {
+        type            empty;
+    }
+}
+EOL
+
+verify_file "$u_file"
+
+# Copy to 0 directory
+cp "$u_file" "$case_dir/0/"
+
+# Create a special pulsatile velocity file for later use
+pulsatile_u_file="$case_dir/0.orig/U.pulsatile"
+cat > "$pulsatile_u_file" << EOL
+/*--------------------------------*- C++ -*----------------------------------*\\
+| =========                 |                                                 |
+| \\\\      /  F ield         | OpenFOAM: The Open Source CFD Toolbox           |
+|  \\\\    /   O peration     | Version:  v2412                                 |
+|   \\\\  /    A nd           | Website:  www.openfoam.com                      |
+|    \\\\/     M anipulation  |                                                 |
+\\*---------------------------------------------------------------------------*/
+FoamFile
+{
+    version     2.0;
+    format      ascii;
+    class       volVectorField;
+    object      U;
+}
+// * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * //
+
+dimensions      [0 1 -1 0 0 0 0];
+
+internalField   uniform (0.05 0 0);  // Keep velocity low
 
 boundaryField
 {
     inlet
     {
         type            codedFixedValue;
-        value           uniform (0.05 0 0);  // Start with a lower velocity
+        value           uniform (0.05 0 0);
         
         name            pulsatileFlow;
         
@@ -727,24 +619,38 @@ boundaryField
         #{
             // Calculate phase in cardiac cycle (0 to 1)
             scalar t = this->db().time().value();
+            scalar initTime = $init_time;
             scalar cycleTime = $cycle_time;
             
-            // Use a ramp-up factor for gradual start
-            scalar rampUpTime = 0.2;  // Longer ramp time
-            scalar rampFactor = min(t/rampUpTime, 1.0);
+            // Only apply pulsatile flow after initialization period
+            if (t <= initTime) {
+                // During initialization, keep constant low velocity
+                scalar velocity = 0.05;
+                
+                const vectorField& centers = patch().Cf();
+                vectorField& patchField = *this;
+                
+                forAll(patchField, i) {
+                    patchField[i] = vector(velocity, 0, 0);
+                }
+                
+                return;
+            }
             
-            scalar phase = fmod(t, cycleTime) / cycleTime;
+            // Calculate phase for pulsatile period
+            scalar adjustedTime = t - initTime;
+            scalar phase = fmod(adjustedTime, cycleTime) / cycleTime;
             
-            // Use much lower velocities for stability with high stenosis
+            // Use very low velocities for stability with high stenosis
             scalar baseVelocity = 0.05;  // m/s, minimum velocity
-            scalar amplitude = 0.1 * rampFactor;  // m/s, peak velocity increase
+            scalar amplitude = 0.05;     // m/s, very small amplitude for stability
             
             // Calculate pulsatile velocity using a very smooth profile
             scalar velocity;
             
             // Create a very smooth transition for better numerical stability
             if (phase < 0.3) {
-                // Systolic acceleration (smoother sine rise)
+                // Systolic acceleration (smoother cosine rise)
                 scalar normPhase = phase / 0.3;  // normalize to 0-1 for this segment
                 velocity = baseVelocity + amplitude * 0.5 * (1.0 - cos(normPhase * M_PI));
             } else if (phase < 0.6) {
@@ -764,8 +670,7 @@ boundaryField
             
             vectorField& patchField = *this;
             
-            forAll(centers, i)
-            {
+            forAll(centers, i) {
                 vector pos = centers[i];
                 
                 // Calculate distance from center of inlet
@@ -797,64 +702,12 @@ boundaryField
         type            empty;
     }
 }
-
-// ************************************************************************* //
 EOL
-else
-    # Create standard steady velocity for simpleFoam
-    cat > "$u_file" << EOL
-/*--------------------------------*- C++ -*----------------------------------*\\
-| =========                 |                                                 |
-| \\\\      /  F ield         | OpenFOAM: The Open Source CFD Toolbox           |
-|  \\\\    /   O peration     | Version:  v2412                                 |
-|   \\\\  /    A nd           | Website:  www.openfoam.com                      |
-|    \\\\/     M anipulation  |                                                 |
-\\*---------------------------------------------------------------------------*/
-FoamFile
-{
-    version     2.0;
-    format      ascii;
-    class       volVectorField;
-    object      U;
-}
-// * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * //
 
-dimensions      [0 1 -1 0 0 0 0];
+verify_file "$pulsatile_u_file"
 
-internalField   uniform (0.4 0 0);
-
-boundaryField
-{
-    inlet
-    {
-        type            fixedValue;
-        value           uniform (0.4 0 0);
-    }
-
-    outlet
-    {
-        type            zeroGradient;
-    }
-
-    wall
-    {
-        type            noSlip;
-    }
-
-    frontAndBack
-    {
-        type            empty;
-    }
-}
-
-// ************************************************************************* //
-EOL
-fi
-
-verify_file "$u_file"
-
-# k (turbulent kinetic energy)
-k_file="$case_dir/0/k"
+# Create k (turbulent kinetic energy)
+k_file="$case_dir/0.orig/k"
 cat > "$k_file" << EOL
 /*--------------------------------*- C++ -*----------------------------------*\\
 | =========                 |                                                 |
@@ -874,14 +727,14 @@ FoamFile
 
 dimensions      [0 2 -2 0 0 0 0];
 
-internalField   uniform 0.0006;
+internalField   uniform 0.0001;  // Lower initial value for stability
 
 boundaryField
 {
     inlet
     {
         type            fixedValue;
-        value           uniform 0.0006;
+        value           uniform 0.0001;
     }
 
     outlet
@@ -892,7 +745,7 @@ boundaryField
     wall
     {
         type            kqRWallFunction;
-        value           uniform 0.0006;
+        value           uniform 0.0001;
     }
 
     frontAndBack
@@ -900,14 +753,15 @@ boundaryField
         type            empty;
     }
 }
-
-// ************************************************************************* //
 EOL
 
 verify_file "$k_file"
 
-# omega (specific dissipation rate)
-omega_file="$case_dir/0/omega"
+# Copy to 0 directory
+cp "$k_file" "$case_dir/0/"
+
+# Create omega (specific dissipation rate)
+omega_file="$case_dir/0.orig/omega"
 cat > "$omega_file" << EOL
 /*--------------------------------*- C++ -*----------------------------------*\\
 | =========                 |                                                 |
@@ -927,14 +781,14 @@ FoamFile
 
 dimensions      [0 0 -1 0 0 0 0];
 
-internalField   uniform 100;
+internalField   uniform 10;  // Lower value for stability
 
 boundaryField
 {
     inlet
     {
         type            fixedValue;
-        value           uniform 100;
+        value           uniform 10;
     }
 
     outlet
@@ -945,7 +799,7 @@ boundaryField
     wall
     {
         type            omegaWallFunction;
-        value           uniform 100;
+        value           uniform 10;
     }
 
     frontAndBack
@@ -953,14 +807,15 @@ boundaryField
         type            empty;
     }
 }
-
-// ************************************************************************* //
 EOL
 
 verify_file "$omega_file"
 
-# nut (turbulent viscosity)
-nut_file="$case_dir/0/nut"
+# Copy to 0 directory
+cp "$omega_file" "$case_dir/0/"
+
+# Create nut (turbulent viscosity)
+nut_file="$case_dir/0.orig/nut"
 cat > "$nut_file" << EOL
 /*--------------------------------*- C++ -*----------------------------------*\\
 | =========                 |                                                 |
@@ -1007,19 +862,18 @@ boundaryField
         type            empty;
     }
 }
-
-// ************************************************************************* //
 EOL
 
 verify_file "$nut_file"
 
-# STEP 3: CREATE GEOMETRY AND MESH
+# Copy to 0 directory
+cp "$nut_file" "$case_dir/0/"
 
-# Create a fixed blockMeshDict file without using #calc or #codeStream
+# Create blockMeshDict
 echo_info "Creating blockMesh dictionary..."
 block_mesh_file="$case_dir/system/blockMeshDict"
 
-# Calculate stenosis radius (safer to do it here in the script)
+# Calculate stenosis radius
 AORTA_RADIUS=12.5 # mm
 STENOSIS_RADIUS=$(echo "$AORTA_RADIUS * (1.0 - $stenosis_level)" | bc -l)
 AORTA_LENGTH=150.0 # mm
@@ -1033,8 +887,8 @@ FIRST_LENGTH=$(echo "$INLET_POS / $AORTA_LENGTH" | bc -l)
 STENOSIS_SECTION=$(echo "$STENOSIS_LENGTH / $AORTA_LENGTH" | bc -l)
 LAST_LENGTH=$(echo "1.0 - $FIRST_LENGTH - $STENOSIS_SECTION" | bc -l)
 
-# Calculate cell counts
-TOTAL_CELLS_LENGTH=100
+# Calculate cell counts - use coarser mesh for stability
+TOTAL_CELLS_LENGTH=80  # Reduced from 100
 CELLS_FIRST=$(echo "($FIRST_LENGTH * $TOTAL_CELLS_LENGTH)/1" | bc)
 CELLS_STENOSIS=$(echo "($STENOSIS_SECTION * $TOTAL_CELLS_LENGTH)/1" | bc)
 CELLS_LAST=$(echo "($LAST_LENGTH * $TOTAL_CELLS_LENGTH)/1" | bc)
@@ -1045,7 +899,7 @@ if [ "$CELLS_CHECK" -ne "$TOTAL_CELLS_LENGTH" ]; then
     CELLS_FIRST=$(echo "$CELLS_FIRST + ($TOTAL_CELLS_LENGTH - $CELLS_CHECK)" | bc)
 fi
 
-# Create the blockMeshDict with explicitly calculated values
+# Create blockMeshDict with explicitly calculated values
 cat > "$block_mesh_file" << EOL
 /*--------------------------------*- C++ -*----------------------------------*\\
 | =========                 |                                                 |
@@ -1066,7 +920,7 @@ FoamFile
 // Convert mm to m
 scale 0.001;
 
-// Stenosis parameters (pre-calculated)
+// Stenosis parameters
 // Radius: $AORTA_RADIUS mm
 // Stenosis level: $stenosis_level
 // Stenosis radius: $STENOSIS_RADIUS mm
@@ -1110,22 +964,22 @@ blocks
 (
     // Block 0: Inlet to stenosis start
     hex (0 1 11 10 3 2 12 13)
-    ($CELLS_FIRST 15 1)
+    ($CELLS_FIRST 12 1)  // Coarser mesh
     simpleGrading (1 1 1)
     
     // Block 1: Stenosis section (first half)
     hex (1 4 14 11 2 5 15 12)
-    ($CELLS_STENOSIS 15 1)
+    ($CELLS_STENOSIS 12 1)  // Coarser mesh
     simpleGrading (1 1 1)
     
     // Block 2: Stenosis section (second half)
     hex (4 6 16 14 5 7 17 15)
-    ($CELLS_STENOSIS 15 1)
+    ($CELLS_STENOSIS 12 1)  // Coarser mesh
     simpleGrading (1 1 1)
     
     // Block 3: Outlet section
     hex (6 8 18 16 7 9 19 17)
-    ($CELLS_LAST 15 1)
+    ($CELLS_LAST 12 1)  // Coarser mesh
     simpleGrading (1 1 1)
 );
 
@@ -1198,7 +1052,7 @@ EOL
 
 verify_file "$block_mesh_file"
 
-# Create decomposeParDict for parallel execution (optional)
+# Create decomposeParDict for parallel execution
 decompose_file="$case_dir/system/decomposeParDict"
 cat > "$decompose_file" << EOL
 /*--------------------------------*- C++ -*----------------------------------*\\
@@ -1226,66 +1080,8 @@ EOL
 
 verify_file "$decompose_file"
 
-# Create a Gmsh geometry file for the aorta with stenosis
-echo_info "Creating Gmsh geometry file..."
-gmsh_geo_file="$case_dir/aorta.geo"
-cat > "$gmsh_geo_file" << EOL
-// Parameters for aorta with atherosclerosis
-diameter = 25.0;  // Aorta diameter in mm (average adult aorta ~25mm)
-length = 150.0;   // Length of segment in mm
-stenosis_level = $stenosis_level;  // 0.0 = no stenosis, 1.0 = complete occlusion
-stenosis_length = 20.0;  // Length of the stenotic region in mm
-stenosis_position = length/2;  // Position of stenosis center from inlet
-mesh_size = $mesh_size;  // Default mesh size (smaller values create finer mesh)
-
-// Calculate stenosis height based on stenosis level
-stenosis_height = diameter * stenosis_level / 2;
-
-// Points for upper wall
-Point(1) = {0, diameter/2, 0, mesh_size};  // Inlet top
-Point(2) = {stenosis_position - stenosis_length/2, diameter/2, 0, mesh_size};  // Start of stenosis top
-Point(3) = {stenosis_position, diameter/2 - stenosis_height, 0, mesh_size/4};  // Peak of stenosis top (finer mesh)
-Point(4) = {stenosis_position + stenosis_length/2, diameter/2, 0, mesh_size};  // End of stenosis top
-Point(5) = {length, diameter/2, 0, mesh_size};  // Outlet top
-
-// Points for lower wall
-Point(6) = {0, -diameter/2, 0, mesh_size};  // Inlet bottom
-Point(7) = {stenosis_position - stenosis_length/2, -diameter/2, 0, mesh_size};  // Start of stenosis bottom
-Point(8) = {stenosis_position, -diameter/2 + stenosis_height, 0, mesh_size/4};  // Peak of stenosis bottom (finer mesh)
-Point(9) = {stenosis_position + stenosis_length/2, -diameter/2, 0, mesh_size};  // End of stenosis bottom
-Point(10) = {length, -diameter/2, 0, mesh_size};  // Outlet bottom
-
-// Create splines for the walls (smoother than straight lines)
-Spline(1) = {1, 2, 3, 4, 5};  // Upper wall
-Spline(2) = {6, 7, 8, 9, 10};  // Lower wall
-
-// Create inlet and outlet lines
-Line(3) = {1, 6};  // Inlet
-Line(4) = {5, 10}; // Outlet
-
-// Create surface for the fluid domain
-Line Loop(1) = {1, 4, -2, -3};
-Plane Surface(1) = {1};
-
-// Define physical groups for OpenFOAM boundary conditions
-Physical Curve("inlet") = {3};
-Physical Curve("outlet") = {4};
-Physical Curve("wall") = {1, 2};
-Physical Surface("fluid") = {1};
-
-// Mesh settings for better quality
-Mesh.RecombineAll = 1;  // Generate quadrilateral elements where possible
-Mesh.Smoothing = 20;    // Mesh smoothing steps
-Mesh.Algorithm = 6;     // Frontal-Delaunay for quads
-EOL
-
-verify_file "$gmsh_geo_file"
-
-# STEP 4: MESH GENERATION AND SIMULATION SETUP
-echo_info "Setting up mesh and simulation..."
-
-# Option 1: Use blockMesh (more reliable)
-echo_info "Generating mesh with blockMesh..."
+# Generate mesh
+echo_info "Generating mesh..."
 blockMesh -case "$case_dir" > "$case_dir/blockMesh.log" 2>&1
 
 if [ $? -ne 0 ]; then
@@ -1295,125 +1091,179 @@ if [ $? -ne 0 ]; then
 fi
 echo_success "blockMesh completed successfully"
 
-# Option 2: Alternative to use Gmsh if blockMesh fails
-if [ ! -d "$case_dir/constant/polyMesh" ] || [ ! -f "$case_dir/constant/polyMesh/points" ]; then
-    echo_warning "blockMesh output not found, trying with Gmsh instead..."
-    
-    # Run Gmsh to generate the mesh
-    echo_info "Generating mesh with Gmsh..."
-    gmsh -2 "$case_dir/aorta.geo" -o "$case_dir/aorta.msh" > "$case_dir/gmsh.log" 2>&1
-    
-    if [ $? -ne 0 ]; then
-        echo_error "Gmsh failed to generate the mesh. Check log: $case_dir/gmsh.log"
-        cat "$case_dir/gmsh.log"
-        exit 1
-    fi
-    
-    echo_info "Converting Gmsh mesh to OpenFOAM format..."
-    gmshToFoam "$case_dir/aorta.msh" -case "$case_dir" > "$case_dir/gmshToFoam.log" 2>&1
-    
-    if [ $? -ne 0 ]; then
-        echo_error "gmshToFoam conversion failed. Check log: $case_dir/gmshToFoam.log"
-        cat "$case_dir/gmshToFoam.log"
-        exit 1
-    fi
-    
-    # Update boundary file if needed
-    echo_info "Updating boundary conditions after Gmsh conversion..."
-    createPatch -overwrite -case "$case_dir" > "$case_dir/createPatch.log" 2>&1
-fi
-
 # Check mesh quality
 echo_info "Checking mesh quality..."
 checkMesh -case "$case_dir" > "$case_dir/checkMesh.log" 2>&1
 
-# Check for mesh errors
-if grep -q "FAILED" "$case_dir/checkMesh.log"; then
-    echo_warning "Mesh check found issues. See details in: $case_dir/checkMesh.log"
-    echo_info "This may impact simulation accuracy, but we'll proceed anyway."
-else
-    echo_success "Mesh check passed successfully"
+# Run the simulation in multiple stages
+
+# Stage 1: Run initialization with PISO (steady-state mode)
+echo_info "Starting initialization phase with pisoFoam for $init_time seconds..."
+pisoFoam -case "$case_dir" > "$case_dir/pisoFoam.log" 2>&1 &
+PISO_PID=$!
+
+# Monitor the progress of the initialization
+echo_info "Monitoring initialization progress..."
+PREV_TIME=0
+while kill -0 $PISO_PID 2>/dev/null; do
+    if [ -d "$case_dir" ]; then
+        LATEST_TIME=$(find "$case_dir" -maxdepth 1 -name "[0-9]*" | sort -n | tail -1)
+        if [ -n "$LATEST_TIME" ]; then
+            CURRENT_TIME=$(basename "$LATEST_TIME")
+            if (( $(echo "$CURRENT_TIME > $PREV_TIME" | bc -l) )); then
+                echo_info "Simulation time: $CURRENT_TIME seconds"
+                PREV_TIME=$CURRENT_TIME
+                
+                # Check if we've reached initialization time
+                if (( $(echo "$CURRENT_TIME >= $init_time" | bc -l) )); then
+                    echo_info "Initialization phase complete, switching to pulsatile flow..."
+                    break
+                fi
+            fi
+        fi
+    fi
+    sleep 5
+done
+
+# If pisoFoam is still running, stop it
+if kill -0 $PISO_PID 2>/dev/null; then
+    echo_info "Stopping pisoFoam to switch to pulsatile flow..."
+    kill $PISO_PID
+    wait $PISO_PID 2>/dev/null
 fi
 
-# STEP 5: RUN THE SIMULATION
-echo_info "Starting OpenFOAM simulation for stenosis level $stenosis_level..."
-if [ "$pulsatile_flow" = true ]; then
-    echo_info "Using $solver for transient pulsatile flow simulation..."
-    echo_info "Simulating $num_cycles cardiac cycles with cycle time of $cycle_time seconds..."
-    echo_info "This may take several minutes to hours depending on your computer..."
-else
-    echo_info "Using $solver for steady-state simulation..."
-    echo_info "This may take several minutes depending on your computer..."
+# Stage 2: Switch to pulsatile flow
+echo_info "Applying pulsatile flow boundary conditions..."
+
+# Find the latest time directory
+LATEST_TIME=$(find "$case_dir" -maxdepth 1 -name "[0-9]*" | sort -n | tail -1)
+if [ -z "$LATEST_TIME" ]; then
+    echo_error "No time directories found. Initialization phase failed."
+    exit 1
 fi
 
-# Run in serial mode with appropriate solver
-$solver -case "$case_dir" > "$case_dir/${solver}.log" 2>&1
+CURRENT_TIME=$(basename "$LATEST_TIME")
+echo_info "Using time directory: $CURRENT_TIME"
+
+# Switch to pulsatile velocity boundary condition
+cp "$case_dir/0.orig/U.pulsatile" "$LATEST_TIME/U"
+echo_success "Applied pulsatile boundary condition at time $CURRENT_TIME"
+
+# Change the application in controlDict to pimpleFoam
+sed -i '' 's/application     pisoFoam/application     pimpleFoam/' "$case_dir/system/controlDict"
+
+# Update fvSolution to use PIMPLE algorithm
+cat > "$case_dir/system/fvSolution" << EOL
+/*--------------------------------*- C++ -*----------------------------------*\\
+| =========                 |                                                 |
+| \\\\      /  F ield         | OpenFOAM: The Open Source CFD Toolbox           |
+|  \\\\    /   O peration     | Version:  v2412                                 |
+|   \\\\  /    A nd           | Website:  www.openfoam.com                      |
+|    \\\\/     M anipulation  |                                                 |
+\\*---------------------------------------------------------------------------*/
+FoamFile
+{
+    version     2.0;
+    format      ascii;
+    class       dictionary;
+    object      fvSolution;
+}
+// * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * //
+
+solvers
+{
+    p
+    {
+        solver          PCG;
+        preconditioner  DIC;
+        tolerance       1e-6;
+        relTol          0.1;
+    }
+    
+    pFinal
+    {
+        solver          PCG;
+        preconditioner  DIC;
+        tolerance       1e-6;
+        relTol          0.1;
+    }
+
+    "(U|k|omega|nut)"
+    {
+        solver          smoothSolver;
+        smoother        symGaussSeidel;
+        tolerance       1e-6;
+        relTol          0.1;
+    }
+
+    "(U|k|omega|nut)Final"
+    {
+        solver          smoothSolver;
+        smoother        symGaussSeidel;
+        tolerance       1e-6;
+        relTol          0.1;
+    }
+}
+
+PIMPLE
+{
+    nOuterCorrectors 1;
+    nCorrectors      1;
+    nNonOrthogonalCorrectors 0;
+    pRefCell        0;
+    pRefValue       0;
+    momentumPredictor no;
+}
+
+relaxationFactors
+{
+    fields
+    {
+        p               0.3;
+    }
+    equations
+    {
+        U               0.3;
+        k               0.3;
+        omega           0.3;
+    }
+}
+EOL
+
+# Run the pulsatile simulation
+echo_info "Starting pulsatile flow simulation with pimpleFoam..."
+echo_info "Simulating from time $CURRENT_TIME to $total_time seconds..."
+
+pimpleFoam -case "$case_dir" > "$case_dir/pimpleFoam.log" 2>&1
 
 # Check if simulation completed successfully
 if [ $? -eq 0 ]; then
     echo_success "Simulation completed successfully!"
     echo_info "Results available in directory: $case_dir"
     
-    # Run post-processing for wall shear stress
-    echo_info "Running post-processing for visualization data..."
+    # Create basic plots directory
+    mkdir -p "plots"
+    echo_info "Creating basic result plots in 'plots' directory..."
     
-    # Get the latest time directory
-    latest_time=$(find "$case_dir" -maxdepth 1 -name "[0-9]*" | sort -n | tail -1)
-    latest_time_value=$(basename "$latest_time")
-    
-    if [ ! -z "$latest_time_value" ]; then
-        echo_info "Using latest time directory: $latest_time_value"
-        
-        # Calculate wall shear stress using the wallShearStress function object
-        postProcess -func wallShearStress -case "$case_dir" -time "$latest_time_value" > "$case_dir/postWallShearStress.log" 2>&1
-        
-        # Sample data along centerline and walls
-        postProcess -func sample -case "$case_dir" -time "$latest_time_value" > "$case_dir/postSample.log" 2>&1
-        
-        # Create basic plots directory
-        mkdir -p "plots"
-        echo_info "Creating basic result plots in 'plots' directory..."
-        
-        if [ -f "plot_results.py" ]; then
-            python3 plot_results.py --dirs "$case_dir" --all
-            echo_success "Created visualization plots in 'plots' directory"
-        else
-            echo_warning "plot_results.py not found, skipping automatic plot generation"
-        fi
+    if [ -f "plot_pulsatile_results.py" ]; then
+        python3 plot_pulsatile_results.py --case "$case_dir" --all
+        echo_success "Created visualization plots in 'plots' directory"
+    elif [ -f "plot_results.py" ]; then
+        python3 plot_results.py --dirs "$case_dir" --all
+        echo_success "Created basic visualization plots in 'plots' directory"
     else
-        echo_warning "No time directories found. Post-processing skipped."
+        echo_warning "Plotting scripts not found, skipping automatic plot generation"
     fi
     
-    if [ "$pulsatile_flow" = true ]; then
-        echo_info "For animation of pulsatile flow, use: paraFoam -case $case_dir"
-        echo_info "You can create a time animation in ParaView using the Play button or Animation View."
-    else
-        echo_info "You can visualize results with: paraFoam -case $case_dir"
-    fi
+    echo_info "For animation of pulsatile flow, use: paraFoam -case $case_dir"
 else
-    echo_error "Simulation encountered errors. Check log file: $case_dir/${solver}.log"
+    echo_error "Simulation encountered errors. Check log file: $case_dir/pimpleFoam.log"
     echo_info "Last 20 lines of the log file:"
-    tail -n 20 "$case_dir/${solver}.log"
-    
-    # Try to identify specific errors
-    if grep -q "attempt to read beyond EOF" "$case_dir/${solver}.log"; then
-        echo_error "EOF error detected in boundary conditions. This usually indicates a problem with the field files in the 0/ directory."
-    fi
-    if grep -q "could not find file" "$case_dir/${solver}.log"; then
-        echo_error "Missing file error detected. Check that all required files exist."
-    fi
-    if grep -q "divergence" "$case_dir/${solver}.log"; then
-        echo_error "Solution divergence detected. Try reducing relaxation factors in system/fvSolution."
-    fi
+    tail -n 20 "$case_dir/pimpleFoam.log"
 fi
 
-if [ "$pulsatile_flow" = true ]; then
-    echo "======================================================="
-    echo "Pulsatile flow simulation complete for stenosis level: $stenosis_level"
-    echo "Simulated $num_cycles cardiac cycles with cycle time of $cycle_time seconds"
-    echo "======================================================="
-else
-    echo "======================================================="
-    echo "Steady flow simulation complete for stenosis level: $stenosis_level"
-    echo "======================================================="
-fi
+echo "======================================================="
+echo "Two-stage pulsatile flow simulation complete for stenosis level: $stenosis_level"
+echo "Initialization time: $init_time seconds"
+echo "Pulsatile cycles: $num_cycles with cycle time of $cycle_time seconds"
+echo "======================================================="
