@@ -1,104 +1,204 @@
 # CFD Simulation of Blood Flow in Atherosclerotic Aorta
 
-This repository contains files and scripts for simulating blood flow through an aorta with atherosclerotic plaque using OpenFOAM and Gmsh.
+This repository contains a self-contained framework for simulating blood flow through an aorta with atherosclerotic plaque using OpenFOAM and Gmsh.
+
+## Overview
+
+This simulation framework models blood flow through an aorta with varying degrees of stenosis (narrowing) to study hemodynamic changes associated with atherosclerosis. The simulation uses:
+
+- **OpenFOAM v2412**: For computational fluid dynamics
+- **Gmsh**: For parametric mesh generation
+- **Python**: For visualization and post-processing
+- **k-ω SST Turbulence Model**: For accurate flow modeling near walls
 
 ## Requirements
 
-- OpenFOAM v2412
-- Gmsh 4.x or newer
-- Python 3.x with numpy and matplotlib
-- ParaView (for visualization)
+The setup script will check for and help install:
 
-## File Structure
+- **OpenFOAM v2412**
+- **Gmsh 4.x or newer**
+- **Python 3.x** with packages:
+  - numpy
+  - matplotlib
+- **ParaView** (for visualization)
 
-- `setup_openfoam_macos.sh` - Script to set up OpenFOAM environment on macOS
-- `runSingleStenosis.sh` - Run a single case with configurable stenosis level
-- `visualize_results.py` - Post-process and generate plots from results
-- `.gitignore` - Ensures large meshes and output files aren't tracked by git
+## Quick Start
 
-## Setup and Running
+### 1. One-Step Setup
 
-### 1. Environment Setup
-
-First, ensure OpenFOAM and Gmsh are properly set up by running:
+Run the comprehensive setup script to create a virtual environment and verify all dependencies:
 
 ```bash
-chmod +x setup_openfoam_macos.sh
-source ./setup_openfoam_macos.sh
+chmod +x setup.sh
+./setup.sh
 ```
 
-### 2. Run a Single Case
+This script will:
+1. Create a Python virtual environment
+2. Install required Python packages
+3. Check for OpenFOAM and Gmsh installations
+4. Integrate all components into the virtual environment
+
+### 2. Activate the Environment
+
+After setup, activate the environment:
+
+```bash
+source venv/bin/activate
+# Or use the convenience script
+./activate.sh
+```
+
+### 3. Run a Simulation
 
 To run a simulation with default settings (moderate stenosis, 50% occlusion):
 
 ```bash
-chmod +x runSingleStenosis.sh
-./runSingleStenosis.sh
+./runStenosis.sh
 ```
 
 To specify a different stenosis level:
 
 ```bash
-./runSingleStenosis.sh --level 0.3 --name mild
+./runStenosis.sh --level 0.3 --name mild
 ```
 
 Available options:
-- `--level` - Stenosis level from 0.0 (healthy) to 0.8 (severe), where the value represents the proportion of vessel diameter occluded
-- `--name` - A name for the simulation case (for reference)
+- `--level`: Stenosis level from 0.0 (healthy) to 0.8 (severe)
+- `--name`: A name for the simulation case
+- `--mesh`: Mesh resolution (default: 0.5, smaller = finer)
+- `--iterations`: Number of iterations (default: 2000)
 
-### 3. Visualize Results
+### 4. Visualize Results
 
-After the simulation completes, you can visualize the results using ParaView:
+After simulation completes, visualize results using ParaView:
 
 ```bash
-paraFoam -case aorta_simulation
+paraFoam -case aorta_simulation_moderate
 ```
 
 Or generate plots using the Python script:
 
 ```bash
-python3 visualize_results.py
+python plot_results.py
 ```
 
-This will create various plots in the `plots` directory.
+This will create plots in the `plots` directory, showing:
+- Velocity profiles along centerline
+- Pressure distribution
+- Wall shear stress values
 
-## Geometry and Mesh
+## Installation Details
 
-The aorta geometry is created parametrically in Gmsh with the following features:
+### macOS
 
-- Diameter: 25mm (typical adult aorta)
-- Length: 150mm segment
-- Stenosis: Parametrically controlled constriction at the midpoint
-- 3D mesh: Created by extruding a 2D base geometry with a thin layer (quasi-2D)
+1. **OpenFOAM**:
+   - Download from https://openfoam.org/download/macos/
+   - Follow installation instructions for v2412
+
+2. **Gmsh**:
+   ```bash
+   brew install gmsh
+   ```
+   
+3. **Python & Dependencies**:
+   ```bash
+   brew install python3
+   ```
+   (Other dependencies installed by setup.sh)
+
+### Linux (Ubuntu/Debian)
+
+1. **OpenFOAM**:
+   ```bash
+   sudo add-apt-repository http://dl.openfoam.org/ubuntu
+   sudo sh -c "wget -O - https://dl.openfoam.org/gpg.key | apt-key add -"
+   sudo apt-get update
+   sudo apt-get install openfoam2412
+   ```
+
+2. **Gmsh**:
+   ```bash
+   sudo apt-get install gmsh
+   ```
+
+3. **Python & Dependencies**:
+   ```bash
+   sudo apt-get install python3 python3-pip python3-venv
+   ```
+   (Other dependencies installed by setup.sh)
+
+## File Structure
+
+- `setup.sh` - Comprehensive environment setup script
+- `activate.sh` - Convenience script to activate the environment
+- `runStenosis.sh` - Script to run a simulation with configurable stenosis
+- `plot_results.py` - Post-process and generate plots from results
+- `aorta2d.geo` - Gmsh geometry template for the stenotic aorta
+- `aortaCase/` - Template OpenFOAM case structure
 
 ## Physics Model
 
 The simulation uses:
 
-- Steady-state incompressible flow (simpleFoam)
-- kOmegaSST turbulence model
-- Blood properties:
+- **Fluid**: Blood (Newtonian approximation)
   - Density: 1060 kg/m³
   - Kinematic viscosity: 3.3×10⁻⁶ m²/s
-- Inlet velocity: 0.4 m/s (typical aortic blood flow)
+- **Flow**: Steady-state incompressible (simpleFoam)
+- **Turbulence**: k-ω SST model
+- **Inlet**: Parabolic velocity profile (0.4 m/s average)
+- **Outlet**: Zero pressure gradient
+- **Walls**: No-slip condition
+
+## Geometry Parameters
+
+The aorta geometry is created parametrically with the following features:
+
+- **Diameter**: 25mm (typical adult aorta)
+- **Length**: 150mm segment
+- **Stenosis**: Configurable constriction at the midpoint
+  - Level: 0.0 (healthy) to 0.8 (severe)
+  - Length: 20mm
+  - Position: Center of vessel
 
 ## Extending the Model
 
 This baseline model can be extended to:
 
-1. **Pulsatile flow**: Replace simpleFoam with pimpleFoam and define time-varying inlet velocity
-2. **Patient-specific geometry**: Import medical imaging data instead of parametric geometry
-3. **Non-Newtonian blood model**: Modify transportProperties with a Carreau-Yasuda model
-4. **Fluid-structure interaction**: Include wall compliance effects
+1. **Pulsatile flow**: 
+   - Replace simpleFoam with pimpleFoam
+   - Define time-varying inlet velocity using codedFixedValue
+
+2. **Patient-specific geometry**:
+   - Import medical imaging data (CT/MRI)
+   - Convert to STL and create mesh
+
+3. **Non-Newtonian blood model**:
+   - Modify transportProperties with a Carreau-Yasuda model
+
+4. **Fluid-structure interaction**:
+   - Include wall compliance
+   - Use solidDisplacementFoam coupled with fluid solver
 
 ## Troubleshooting
 
 If you encounter issues:
 
-1. **Mesh generation problems**: Adjust mesh size parameter in the .geo file
-2. **Solver divergence**: Reduce relaxation factors in fvSolution
-3. **Poor quality results**: Check y+ values to ensure proper mesh resolution near walls
-4. **ParaView crashes**: Try reconstructPar first if running in parallel
+1. **Setup problems**:
+   - Check `.env_status` file for version information
+   - Verify OpenFOAM environment with `echo $FOAM_INST_DIR`
+
+2. **Mesh generation problems**:
+   - Adjust mesh size parameter with `--mesh 0.8` (larger = coarser)
+   - Check for geometry errors in Gmsh
+
+3. **Solver divergence**:
+   - Reduce relaxation factors in fvSolution
+   - Increase iterations with `--iterations 5000`
+
+4. **Visualization issues**:
+   - Make sure ParaView is compatible with your OpenFOAM version
+   - Try running `reconstructPar` first if running in parallel
 
 ## License
 
