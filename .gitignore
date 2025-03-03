@@ -13,6 +13,8 @@ aorta_simulation*/
 */postProcessing/
 */dynamicCode/
 */VTK/
+*.png
+*.jpg
 
 # Gmsh temporary files
 *.geo.bak
