@@ -981,7 +981,7 @@ EOL
 fi
 
 # Create Gmsh geometry with variable mesh refinement
-echo_info "Creating Gmsh geometry with variable refinement..."
+echo_info "Creating Gmsh geometry with 3D extrusion and variable refinement..."
 gmsh_geo_file="$case_dir/aorta.geo"
 
 # Adjust mesh parameters for Gmsh
@@ -1000,6 +1000,9 @@ fi
 GMSH_BASE_SIZE=$(echo "$GMSH_BASE_SIZE * $mesh_size" | bc -l)
 GMSH_STENOSIS_SIZE=$(echo "$GMSH_STENOSIS_SIZE * $mesh_size" | bc -l)
 
+# Define the thickness for the 3D extrusion (must be >0 for OpenFOAM)
+THICKNESS=1.0  # 1mm thickness for 3D extrusion
+
 cat > "$gmsh_geo_file" << EOL
 // Parameters for aorta with atherosclerosis
 diameter = 25.0;  // Aorta diameter in mm (average adult aorta ~25mm)
@@ -1009,18 +1012,19 @@ stenosis_length = 20.0;  // Length of the stenotic region in mm
 stenosis_position = length/2;  // Position of stenosis center from inlet
 base_mesh_size = $GMSH_BASE_SIZE;  // Base mesh size (smaller values create finer mesh)
 stenosis_mesh_size = $GMSH_STENOSIS_SIZE; // Fine mesh at stenosis
+thickness = $THICKNESS;  // Extrusion thickness in mm
 
 // Calculate stenosis height based on stenosis level
 stenosis_height = diameter * stenosis_level / 2;
 
-// Points for upper wall
+// Points for upper wall (z=0 plane)
 Point(1) = {0, diameter/2, 0, base_mesh_size};  // Inlet top
 Point(2) = {stenosis_position - stenosis_length/2, diameter/2, 0, base_mesh_size};  // Start of stenosis top
 Point(3) = {stenosis_position, diameter/2 - stenosis_height, 0, stenosis_mesh_size};  // Peak of stenosis top (finer mesh)
 Point(4) = {stenosis_position + stenosis_length/2, diameter/2, 0, base_mesh_size};  // End of stenosis top
 Point(5) = {length, diameter/2, 0, base_mesh_size};  // Outlet top
 
-// Points for lower wall
+// Points for lower wall (z=0 plane)
 Point(6) = {0, -diameter/2, 0, base_mesh_size};  // Inlet bottom
 Point(7) = {stenosis_position - stenosis_length/2, -diameter/2, 0, base_mesh_size};  // Start of stenosis bottom
 Point(8) = {stenosis_position, -diameter/2 + stenosis_height, 0, stenosis_mesh_size};  // Peak of stenosis bottom (finer mesh)
@@ -1039,12 +1043,6 @@ Line(4) = {5, 10}; // Outlet
 Line Loop(1) = {1, 4, -2, -3};
 Plane Surface(1) = {1};
 
-// Define physical groups for OpenFOAM boundary conditions
-Physical Curve("inlet") = {3};
-Physical Curve("outlet") = {4};
-Physical Curve("wall") = {1, 2};
-Physical Surface("fluid") = {1};
-
 // Create mesh size field to refine near stenosis
 Field[1] = Distance;
 Field[1].NodesList = {3, 8}; // Points at stenosis peak
@@ -1060,6 +1058,25 @@ Field[2].DistMax = stenosis_length;
 Field[3] = Min;
 Field[3].FieldsList = {2};
 Background Field = 3;
+
+// Create 3D mesh by extrusion in the z-direction
+// This is CRITICAL for OpenFOAM which needs 3D cells
+out[] = Extrude {0, 0, thickness} {
+  Surface{1}; Layers{1}; Recombine;
+};
+
+// Define physical volumes and surfaces for OpenFOAM
+Physical Volume("internal") = {out[1]};
+
+// Define the patches for OpenFOAM boundary conditions
+// Inlet: original curve extruded creates a surface
+Physical Surface("inlet") = {out[2]};
+// Outlet: original curve extruded creates a surface
+Physical Surface("outlet") = {out[4]};
+// Walls: top and bottom curves extruded create surfaces
+Physical Surface("wall") = {out[0], out[3]};
+// Front and back: original surface and its final position
+Physical Surface("frontAndBack") = {1, out[5]};
 
 // Mesh settings for better quality
 Mesh.Algorithm = 6;     // Frontal-Delaunay for quads (more robust)
@@ -1275,7 +1292,7 @@ if [ "$mesher" == "block" ]; then
     
 elif [ "$mesher" == "gmsh" ]; then
     # Use Gmsh for mesh generation
-    echo_info "Running Gmsh to generate mesh..."
+    echo_info "Running Gmsh to generate 3D mesh..."
     
     # Make sure Gmsh is available
     if ! command -v gmsh &> /dev/null; then
@@ -1283,35 +1300,79 @@ elif [ "$mesher" == "gmsh" ]; then
         exit 1
     fi
     
-    # Generate the mesh using Gmsh
-    gmsh -2 "$case_dir/aorta.geo" -o "$case_dir/aorta.msh" -format msh2 -order 1 -v 3 > "$case_dir/gmsh.log" 2>&1
+    # Generate the 3D mesh using Gmsh (explicitly using 3D mode)
+    echo_info "Generating 3D mesh with Gmsh..."
+    gmsh -3 "$case_dir/aorta.geo" -o "$case_dir/aorta.msh" -format msh2 -order 1 -v 3 > "$case_dir/gmsh.log" 2>&1
     
     if [ $? -ne 0 ]; then
         echo_error "Gmsh failed to generate mesh. Check log: $case_dir/gmsh.log"
         cat "$case_dir/gmsh.log"
-        exit 1
-    fi
-    echo_success "Gmsh mesh generation completed"
-    
-    # Convert Gmsh mesh to OpenFOAM format
-    echo_info "Converting Gmsh mesh to OpenFOAM format..."
-    gmshToFoam "$case_dir/aorta.msh" -case "$case_dir" > "$case_dir/gmshToFoam.log" 2>&1
-    
-    if [ $? -ne 0 ]; then
-        echo_error "gmshToFoam conversion failed. Check log: $case_dir/gmshToFoam.log"
-        cat "$case_dir/gmshToFoam.log"
-        exit 1
-    fi
-    echo_success "Gmsh mesh converted to OpenFOAM format"
-    
-    # Fix boundary types with createPatch if needed
-    echo_info "Updating boundary types..."
-    createPatch -overwrite -case "$case_dir" > "$case_dir/createPatch.log" 2>&1
-    
-    if [ $? -ne 0 ]; then
-        echo_warning "createPatch had issues, check log: $case_dir/createPatch.log"
+        
+        # Try fallback with direct blockMesh
+        echo_warning "Trying fallback to blockMesh..."
+        blockMesh -case "$case_dir" > "$case_dir/blockMesh.log" 2>&1
+        
+        if [ $? -ne 0 ]; then
+            echo_error "Both meshing methods failed. Check logs for details."
+            exit 1
+        else
+            echo_success "Fallback to blockMesh succeeded"
+            mesher="block"  # Update mesher type for later steps
+        fi
     else
-        echo_success "Boundary types updated successfully"
+        echo_success "Gmsh 3D mesh generation completed"
+        
+        # Display some info about the generated mesh
+        echo_info "Mesh statistics from Gmsh:"
+        grep "nodes\|elements" "$case_dir/gmsh.log"
+        
+        # Convert Gmsh mesh to OpenFOAM format
+        echo_info "Converting Gmsh mesh to OpenFOAM format..."
+        gmshToFoam "$case_dir/aorta.msh" -case "$case_dir" > "$case_dir/gmshToFoam.log" 2>&1
+        
+        if [ $? -ne 0 ]; then
+            echo_error "gmshToFoam conversion failed. Check log: $case_dir/gmshToFoam.log"
+            cat "$case_dir/gmshToFoam.log"
+            
+            # Try fallback with blockMesh
+            echo_warning "Trying fallback to blockMesh..."
+            blockMesh -case "$case_dir" > "$case_dir/blockMesh.log" 2>&1
+            
+            if [ $? -ne 0 ]; then
+                echo_error "Both meshing methods failed. Check logs for details."
+                exit 1
+            else
+                echo_success "Fallback to blockMesh succeeded"
+                mesher="block"  # Update mesher type for later steps
+            fi
+        else
+            echo_success "Gmsh mesh converted to OpenFOAM format"
+            
+            # Check if any cells were actually created
+            if ! grep -q "cells:" "$case_dir/gmshToFoam.log" || grep -q "cells:[[:space:]]*0" "$case_dir/gmshToFoam.log"; then
+                echo_error "No cells were created during Gmsh conversion."
+                echo_warning "Trying fallback to blockMesh..."
+                blockMesh -case "$case_dir" > "$case_dir/blockMesh.log" 2>&1
+                
+                if [ $? -ne 0 ]; then
+                    echo_error "Both meshing methods failed. Check logs for details."
+                    exit 1
+                else
+                    echo_success "Fallback to blockMesh succeeded"
+                    mesher="block"  # Update mesher type for later steps
+                fi
+            else
+                # Fix boundary types with createPatch
+                echo_info "Updating boundary types..."
+                createPatch -overwrite -case "$case_dir" > "$case_dir/createPatch.log" 2>&1
+                
+                if [ $? -ne 0 ]; then
+                    echo_warning "createPatch had issues, check log: $case_dir/createPatch.log"
+                else
+                    echo_success "Boundary types updated successfully"
+                fi
+            fi
+        fi
     fi
     
     # Check mesh quality
@@ -1320,6 +1381,11 @@ elif [ "$mesher" == "gmsh" ]; then
     
     if grep -q "FAILED" "$case_dir/checkMesh.log"; then
         echo_warning "Mesh check found issues, see details in: $case_dir/checkMesh.log"
+        # Continue anyway unless the mesh is completely broken
+        if grep -q "Mesh is not valid" "$case_dir/checkMesh.log"; then
+            echo_error "Mesh is fundamentally invalid. Cannot continue."
+            exit 1
+        fi
     else
         echo_success "Mesh quality check passed"
     fi
