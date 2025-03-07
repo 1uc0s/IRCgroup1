@@ -15,6 +15,7 @@ aorta_simulation*/
 */VTK/
 *.png
 *.jpg
+*.zip
 
 # Gmsh temporary files
 *.geo.bak
