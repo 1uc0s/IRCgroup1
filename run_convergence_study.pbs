@@ -1,0 +1,277 @@
+#!/bin/bash
+#PBS -l walltime=01:00:00
+#PBS -l select=1:ncpus=4:mem=8gb
+#PBS -N aorta_convergence_study
+#PBS -j oe
+
+# ============================================================================
+# MESH CONVERGENCE STUDY FOR AORTA STENOSIS SIMULATION
+# Run this script on the Imperial HPC system with: qsub run_convergence_study.pbs
+# ============================================================================
+
+# Go to the directory from which the job was submitted
+cd $PBS_O_WORKDIR
+echo "Working directory: $(pwd)"
+
+# Create a directory for this run's results if it doesn't exist
+RESULTS_DIR="convergence_results"
+mkdir -p $RESULTS_DIR
+
+# Load required modules (adjust according to your HPC's OpenFOAM installation)
+echo "Loading modules..."
+module load tools/prod
+module load openfoam/v2412
+module load python
+
+# Print OpenFOAM version
+echo "Using OpenFOAM version:"
+simpleFoam --version
+
+# Mesh resolutions to test (refinement factors - smaller means finer mesh)
+MESH_RESOLUTIONS=("2.0" "1.0" "0.5")
+RESOLUTION_NAMES=("coarse" "medium" "fine")
+
+# Stenosis level to use for all simulations
+STENOSIS_LEVEL=0.5
+
+# Number of iterations for steady state solution
+MAX_ITERATIONS=1000
+
+# Function to extract pressure drop and wall shear stress from results
+extract_metrics() {
+    local case_dir=$1
+    local latest_time=$(find "${case_dir}" -maxdepth 1 -name "[0-9]*" | sort -n | tail -1)
+    
+    if [ -z "$latest_time" ]; then
+        echo "No time directories found in ${case_dir}"
+        return 1
+    fi
+    
+    echo "Extracting metrics from ${case_dir} at time $(basename ${latest_time})"
+    
+    # Extract pressure drop across stenosis
+    postProcess -func sample -case "${case_dir}" -time "$(basename ${latest_time})" -noFunctionObjects > /dev/null 2>&1
+    
+    # Calculate pressure drop from the sample data
+    local pd_file="${latest_time}/centerline_p_raw.xy"
+    if [ -f "$pd_file" ]; then
+        # Take the difference between inlet and outlet pressure
+        local inlet_pressure=$(head -n 10 "$pd_file" | awk '{sum+=$2; count++} END {print sum/count}')
+        local outlet_pressure=$(tail -n 10 "$pd_file" | awk '{sum+=$2; count++} END {print sum/count}')
+        local pressure_drop=$(echo "$inlet_pressure - $outlet_pressure" | bc -l)
+        echo "${pressure_drop}" > "${RESULTS_DIR}/${case_dir}_pressure_drop.txt"
+        echo "Pressure Drop: ${pressure_drop} Pa"
+    else
+        echo "Pressure data not found: $pd_file"
+    fi
+    
+    # Calculate max wall shear stress
+    postProcess -func wallShearStress -case "${case_dir}" -time "$(basename ${latest_time})" -noFunctionObjects > /dev/null 2>&1
+    
+    # Find max wall shear stress from the wall sample data
+    local wss_file="${latest_time}/lowerWall_wallShearStress_raw.xy"
+    if [ -f "$wss_file" ]; then
+        # Calculate WSS magnitude and find maximum
+        local max_wss=$(awk 'BEGIN{max=0} {mag=sqrt($2*$2+$3*$3+$4*$4); if(mag>max) max=mag} END{print max}' "$wss_file")
+        echo "${max_wss}" > "${RESULTS_DIR}/${case_dir}_max_wss.txt"
+        echo "Max Wall Shear Stress: ${max_wss} Pa"
+    else
+        echo "Wall shear stress data not found: $wss_file"
+    fi
+}
+
+# Function to calculate Grid Convergence Index (GCI)
+calculate_gci() {
+    local metric=$1
+    local r=2.0  # Grid refinement factor between levels
+    
+    local f_coarse=$(cat "${RESULTS_DIR}/aorta_simulation_coarse_${metric}.txt")
+    local f_medium=$(cat "${RESULTS_DIR}/aorta_simulation_medium_${metric}.txt")
+    local f_fine=$(cat "${RESULTS_DIR}/aorta_simulation_fine_${metric}.txt")
+    
+    local e21=$(echo "scale=6; ($f_medium - $f_coarse)/$f_medium" | bc -l)
+    local e32=$(echo "scale=6; ($f_fine - $f_medium)/$f_fine" | bc -l)
+    
+    local p=$(echo "scale=6; log(abs($e21/$e32))/log($r)" | bc -l)
+    
+    local gci_medium=$(echo "scale=6; abs($e21)/($r^$p - 1)" | bc -l)
+    local gci_fine=$(echo "scale=6; abs($e32)/($r^$p - 1)" | bc -l)
+    
+    echo "Results for ${metric}:"
+    echo "  Coarse mesh value: ${f_coarse}"
+    echo "  Medium mesh value: ${f_medium}"
+    echo "  Fine mesh value: ${f_fine}"
+    echo "  Relative error coarse-medium: ${e21}"
+    echo "  Relative error medium-fine: ${e32}"
+    echo "  Observed order of convergence: ${p}"
+    echo "  GCI medium: ${gci_medium}"
+    echo "  GCI fine: ${gci_fine}"
+    
+    # Check for asymptotic convergence
+    local ratio=$(echo "scale=6; ($gci_fine/($r^$p * $gci_medium))" | bc -l)
+    echo "  Asymptotic convergence ratio: ${ratio} (should be close to 1.0)"
+    
+    # Print summary to results directory
+    {
+        echo "Results for ${metric}:"
+        echo "  Coarse mesh value: ${f_coarse}"
+        echo "  Medium mesh value: ${f_medium}"
+        echo "  Fine mesh value: ${f_fine}"
+        echo "  Relative error coarse-medium: ${e21}"
+        echo "  Relative error medium-fine: ${e32}"
+        echo "  Observed order of convergence: ${p}"
+        echo "  GCI medium: ${gci_medium}"
+        echo "  GCI fine: ${gci_fine}"
+        echo "  Asymptotic convergence ratio: ${ratio} (should be close to 1.0)"
+    } > "${RESULTS_DIR}/gci_${metric}.txt"
+}
+
+# Main loop to run simulations for different mesh resolutions
+for i in {0..2}; do
+    MESH_SIZE=${MESH_RESOLUTIONS[$i]}
+    RESOLUTION=${RESOLUTION_NAMES[$i]}
+    
+    CASE_DIR="aorta_simulation_${RESOLUTION}"
+    
+    echo "======================================================="
+    echo "Running simulation with ${RESOLUTION} mesh (size factor: ${MESH_SIZE})"
+    echo "======================================================="
+    
+    # Run the main stenosis simulation script with appropriate mesh size
+    # Assuming the original script is available as runStenosis.sh in the same directory
+    bash ./runStenosis.sh --level ${STENOSIS_LEVEL} --name ${RESOLUTION} --mesh ${MESH_SIZE} --iterations ${MAX_ITERATIONS} --mesher block
+    
+    # Extract metrics from the simulation results
+    extract_metrics "${CASE_DIR}"
+    
+    echo "Simulation for ${RESOLUTION} mesh completed"
+    echo "======================================================="
+done
+
+# Calculate GCI for pressure drop and wall shear stress
+echo "Calculating Grid Convergence Index (GCI)..."
+calculate_gci "pressure_drop"
+calculate_gci "max_wss"
+
+# Create a summary file with the mesh convergence results
+echo "Creating summary report..."
+cat > "${RESULTS_DIR}/convergence_summary.txt" << EOL
+================================================================
+MESH CONVERGENCE STUDY SUMMARY
+================================================================
+Stenosis Level: ${STENOSIS_LEVEL}
+
+Mesh Resolutions:
+  Coarse: factor ${MESH_RESOLUTIONS[0]}
+  Medium: factor ${MESH_RESOLUTIONS[1]}
+  Fine: factor ${MESH_RESOLUTIONS[2]}
+
+$(cat "${RESULTS_DIR}/gci_pressure_drop.txt")
+
+$(cat "${RESULTS_DIR}/gci_max_wss.txt")
+
+Convergence Recommendation:
+If GCI fine < 1-2% and the asymptotic ratio is close to 1.0,
+the solution can be considered mesh-independent at the fine mesh level.
+Otherwise, further refinement may be necessary.
+================================================================
+EOL
+
+echo "Mesh convergence study completed. Results are in ${RESULTS_DIR}/convergence_summary.txt"
+
+# Create a basic visualization of the results using Python
+if command -v python3 &> /dev/null; then
+    echo "Creating plots..."
+    python3 -c "
+import matplotlib.pyplot as plt
+import numpy as np
+
+# Define mesh sizes and read results
+mesh_sizes = [float('${MESH_RESOLUTIONS[0]}'), float('${MESH_RESOLUTIONS[1]}'), float('${MESH_RESOLUTIONS[2]}')]
+mesh_names = ['Coarse', 'Medium', 'Fine']
+mesh_cell_counts = [int(100/ms)**2 for ms in mesh_sizes]  # Approximate cell count
+
+# Read pressure drop values
+try:
+    pressure_drops = []
+    for res in ['coarse', 'medium', 'fine']:
+        with open('${RESULTS_DIR}/aorta_simulation_' + res + '_pressure_drop.txt', 'r') as f:
+            pressure_drops.append(float(f.read().strip()))
+    
+    # Create pressure drop plot
+    plt.figure(figsize=(10, 6))
+    plt.plot(mesh_cell_counts, pressure_drops, 'o-', linewidth=2)
+    plt.xscale('log')
+    plt.xlabel('Approximate Cell Count (log scale)')
+    plt.ylabel('Pressure Drop (Pa)')
+    plt.title('Pressure Drop vs Mesh Resolution')
+    plt.grid(True)
+    plt.xticks(mesh_cell_counts, mesh_names)
+    plt.savefig('${RESULTS_DIR}/pressure_drop_convergence.png', dpi=300)
+    
+    # Read wall shear stress values
+    wss_values = []
+    for res in ['coarse', 'medium', 'fine']:
+        with open('${RESULTS_DIR}/aorta_simulation_' + res + '_max_wss.txt', 'r') as f:
+            wss_values.append(float(f.read().strip()))
+    
+    # Create wall shear stress plot
+    plt.figure(figsize=(10, 6))
+    plt.plot(mesh_cell_counts, wss_values, 'o-', linewidth=2, color='orange')
+    plt.xscale('log')
+    plt.xlabel('Approximate Cell Count (log scale)')
+    plt.ylabel('Maximum Wall Shear Stress (Pa)')
+    plt.title('Maximum Wall Shear Stress vs Mesh Resolution')
+    plt.grid(True)
+    plt.xticks(mesh_cell_counts, mesh_names)
+    plt.savefig('${RESULTS_DIR}/wss_convergence.png', dpi=300)
+    
+    # Calculate relative changes
+    pd_change_cm = abs(pressure_drops[1] - pressure_drops[0]) / pressure_drops[1] * 100
+    pd_change_mf = abs(pressure_drops[2] - pressure_drops[1]) / pressure_drops[2] * 100
+    wss_change_cm = abs(wss_values[1] - wss_values[0]) / wss_values[1] * 100
+    wss_change_mf = abs(wss_values[2] - wss_values[1]) / wss_values[2] * 100
+    
+    # Create bar chart of relative changes
+    plt.figure(figsize=(10, 6))
+    labels = ['Pressure Drop', 'Wall Shear Stress']
+    coarse_med = [pd_change_cm, wss_change_cm]
+    med_fine = [pd_change_mf, wss_change_mf]
+    
+    x = np.arange(len(labels))
+    width = 0.35
+    
+    fig, ax = plt.subplots(figsize=(10, 6))
+    rects1 = ax.bar(x - width/2, coarse_med, width, label='Coarse-Medium')
+    rects2 = ax.bar(x + width/2, med_fine, width, label='Medium-Fine')
+    
+    ax.set_ylabel('Relative Change (%)')
+    ax.set_title('Relative Changes Between Mesh Resolutions')
+    ax.set_xticks(x)
+    ax.set_xticklabels(labels)
+    ax.legend()
+    
+    # Add value labels on bars
+    def autolabel(rects):
+        for rect in rects:
+            height = rect.get_height()
+            ax.annotate('{:.2f}%'.format(height),
+                        xy=(rect.get_x() + rect.get_width() / 2, height),
+                        xytext=(0, 3),
+                        textcoords='offset points',
+                        ha='center', va='bottom')
+    
+    autolabel(rects1)
+    autolabel(rects2)
+    
+    plt.tight_layout()
+    plt.savefig('${RESULTS_DIR}/relative_changes.png', dpi=300)
+    
+    print('Plots created successfully!')
+except Exception as e:
+    print(f'Error creating plots: {e}')
+"
+fi
+
+# End of script
+echo "Job completed at $(date)"
