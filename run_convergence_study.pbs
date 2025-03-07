@@ -20,7 +20,7 @@ mkdir -p $RESULTS_DIR
 # Load required modules (adjust according to your HPC's OpenFOAM installation)
 echo "Loading modules..."
 module load tools/prod
-module load openfoam/v2412
+module load openfoam/2.3.0
 module load python
 
 # Print OpenFOAM version
@@ -139,7 +139,7 @@ for i in {0..2}; do
     
     # Run the main stenosis simulation script with appropriate mesh size
     # Assuming the original script is available as runStenosis.sh in the same directory
-    bash ./runStenosis.sh --level ${STENOSIS_LEVEL} --name ${RESOLUTION} --mesh ${MESH_SIZE} --iterations ${MAX_ITERATIONS} --mesher block
+    bash ./runStenosisv3.sh --level ${STENOSIS_LEVEL} --name ${RESOLUTION} --mesh ${MESH_SIZE} --iterations ${MAX_ITERATIONS} --mesher block
     
     # Extract metrics from the simulation results
     extract_metrics "${CASE_DIR}"

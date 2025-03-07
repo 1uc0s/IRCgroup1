@@ -1,5 +1,6 @@
 # OpenFOAM case directories and files
 aorta_simulation*/
+aorta_*/
 */constant/polyMesh/
 */processor*/
 *.[0-9]*
@@ -15,6 +16,8 @@ aorta_simulation*/
 */VTK/
 *.png
 *.jpg
+*.o*
+*.e*
 
 # Gmsh temporary files
 *.geo.bak

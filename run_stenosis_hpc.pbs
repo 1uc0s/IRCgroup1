@@ -1,0 +1,718 @@
+#!/bin/bash
+#PBS -l walltime=00:30:00
+#PBS -l select=1:ncpus=4:mem=4gb
+#PBS -N aorta_simple
+
+# Go to submission directory
+cd $PBS_O_WORKDIR
+echo "Working directory: $(pwd)"
+
+# Load OpenFOAM 2.4.0 module
+echo "Loading OpenFOAM 2.4.0..."
+module load openfoam/2.4.0
+module load tools/prod
+
+# Create directories for a basic case
+CASE_DIR="aorta_basic"
+echo "Creating case directory: $CASE_DIR"
+mkdir -p $CASE_DIR
+mkdir -p $CASE_DIR/0
+mkdir -p $CASE_DIR/constant
+mkdir -p $CASE_DIR/system
+
+# Values for stenosis
+STENOSIS_LEVEL=0.5
+echo "Using stenosis level: $STENOSIS_LEVEL"
+
+# Create a very basic blockMeshDict - simplified format for OpenFOAM 2.3.0
+cat > $CASE_DIR/system/blockMeshDict << EOL
+/*--------------------------------*- C++ -*----------------------------------*\\
+| =========                 |                                                 |
+| \\\\      /  F ield         | OpenFOAM: The Open Source CFD Toolbox           |
+|  \\\\    /   O peration     | Version:  2.3.0                                 |
+|   \\\\  /    A nd           | Web:      www.OpenFOAM.org                      |
+|    \\\\/     M anipulation  |                                                 |
+\\*---------------------------------------------------------------------------*/
+FoamFile
+{
+    version     2.0;
+    format      ascii;
+    class       dictionary;
+    object      blockMeshDict;
+}
+// * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * //
+
+// Convert mm to m
+convertToMeters 0.001;
+
+// Simple stenosis geometry
+// Full diameter: 25mm
+// Stenosis reduces to: 12.5mm (50% occlusion)
+// Length: 150mm
+
+vertices
+(
+    // Bottom face
+    (0 -12.5 0)        // 0
+    (50 -12.5 0)       // 1
+    (75 -6.25 0)       // 2 - stenosis point
+    (100 -12.5 0)      // 3
+    (150 -12.5 0)      // 4
+    
+    // Bottom face, depth 1
+    (0 -12.5 1)        // 5
+    (50 -12.5 1)       // 6
+    (75 -6.25 1)       // 7 - stenosis point
+    (100 -12.5 1)      // 8
+    (150 -12.5 1)      // 9
+    
+    // Top face
+    (0 12.5 0)         // 10
+    (50 12.5 0)        // 11
+    (75 6.25 0)        // 12 - stenosis point
+    (100 12.5 0)       // 13
+    (150 12.5 0)       // 14
+    
+    // Top face, depth 1
+    (0 12.5 1)         // 15
+    (50 12.5 1)        // 16
+    (75 6.25 1)        // 17 - stenosis point
+    (100 12.5 1)       // 18
+    (150 12.5 1)       // 19
+);
+
+blocks
+(
+    // Block 0: Inlet to stenosis start
+    hex (0 1 11 10 5 6 16 15)
+    (20 10 1)
+    simpleGrading (1 1 1)
+    
+    // Block 1: Stenosis section (first half)
+    hex (1 2 12 11 6 7 17 16)
+    (10 10 1)
+    simpleGrading (1 1 1)
+    
+    // Block 2: Stenosis section (second half)
+    hex (2 3 13 12 7 8 18 17)
+    (10 10 1)
+    simpleGrading (1 1 1)
+    
+    // Block 3: Outlet section
+    hex (3 4 14 13 8 9 19 18)
+    (20 10 1)
+    simpleGrading (1 1 1)
+);
+
+edges
+(
+);
+
+patches
+(
+    patch inlet
+    (
+        (0 10 15 5)
+    )
+    
+    patch outlet
+    (
+        (4 9 19 14)
+    )
+    
+    wall walls
+    (
+        // Bottom wall
+        (0 1 6 5)
+        (1 2 7 6)
+        (2 3 8 7)
+        (3 4 9 8)
+        
+        // Top wall
+        (10 15 16 11)
+        (11 16 17 12)
+        (12 17 18 13)
+        (13 18 19 14)
+    )
+    
+    empty frontAndBack
+    (
+        // Front face (z=0)
+        (0 1 11 10)
+        (1 2 12 11)
+        (2 3 13 12)
+        (3 4 14 13)
+        
+        // Back face (z=1)
+        (5 15 16 6)
+        (6 16 17 7)
+        (7 17 18 8)
+        (8 18 19 9)
+    )
+);
+
+mergePatchPairs
+(
+);
+
+// ************************************************************************* //
+EOL
+
+echo "Created blockMeshDict"
+
+# Create controlDict - simpler version for OpenFOAM 2.3.0
+cat > $CASE_DIR/system/controlDict << EOL
+/*--------------------------------*- C++ -*----------------------------------*\\
+| =========                 |                                                 |
+| \\\\      /  F ield         | OpenFOAM: The Open Source CFD Toolbox           |
+|  \\\\    /   O peration     | Version:  2.3.0                                 |
+|   \\\\  /    A nd           | Web:      www.OpenFOAM.org                      |
+|    \\\\/     M anipulation  |                                                 |
+\\*---------------------------------------------------------------------------*/
+FoamFile
+{
+    version     2.0;
+    format      ascii;
+    class       dictionary;
+    object      controlDict;
+}
+// * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * //
+
+application     simpleFoam;
+
+startFrom       startTime;
+
+startTime       0;
+
+stopAt          endTime;
+
+endTime         500;
+
+deltaT          1;
+
+writeControl    timeStep;
+
+writeInterval   100;
+
+purgeWrite      1;
+
+writeFormat     ascii;
+
+writePrecision  6;
+
+writeCompression uncompressed;
+
+timeFormat      general;
+
+timePrecision   6;
+
+runTimeModifiable true;
+
+// ************************************************************************* //
+EOL
+
+echo "Created controlDict"
+
+# Create fvSchemes - simpler version for OpenFOAM 2.3.0
+cat > $CASE_DIR/system/fvSchemes << EOL
+/*--------------------------------*- C++ -*----------------------------------*\\
+| =========                 |                                                 |
+| \\\\      /  F ield         | OpenFOAM: The Open Source CFD Toolbox           |
+|  \\\\    /   O peration     | Version:  2.3.0                                 |
+|   \\\\  /    A nd           | Web:      www.OpenFOAM.org                      |
+|    \\\\/     M anipulation  |                                                 |
+\\*---------------------------------------------------------------------------*/
+FoamFile
+{
+    version     2.0;
+    format      ascii;
+    class       dictionary;
+    object      fvSchemes;
+}
+// * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * //
+
+ddtSchemes
+{
+    default         steadyState;
+}
+
+gradSchemes
+{
+    default         Gauss linear;
+}
+
+divSchemes
+{
+    default         none;
+    div(phi,U)      Gauss upwind;
+    div(phi,k)      Gauss upwind;
+    div(phi,epsilon) Gauss upwind;
+    div(phi,omega)  Gauss upwind;
+    div(phi,R)      Gauss upwind;
+    div(R)          Gauss linear;
+    div(phi,nuTilda) Gauss upwind;
+    div((nuEff*dev2(T(grad(U))))) Gauss linear;
+}
+
+laplacianSchemes
+{
+    default         Gauss linear corrected;
+}
+
+interpolationSchemes
+{
+    default         linear;
+}
+
+snGradSchemes
+{
+    default         corrected;
+}
+
+fluxRequired
+{
+    default         no;
+    p               ;
+}
+
+// ************************************************************************* //
+EOL
+
+echo "Created fvSchemes"
+
+# Create fvSolution - simpler version for OpenFOAM 2.3.0
+cat > $CASE_DIR/system/fvSolution << EOL
+/*--------------------------------*- C++ -*----------------------------------*\\
+| =========                 |                                                 |
+| \\\\      /  F ield         | OpenFOAM: The Open Source CFD Toolbox           |
+|  \\\\    /   O peration     | Version:  2.3.0                                 |
+|   \\\\  /    A nd           | Web:      www.OpenFOAM.org                      |
+|    \\\\/     M anipulation  |                                                 |
+\\*---------------------------------------------------------------------------*/
+FoamFile
+{
+    version     2.0;
+    format      ascii;
+    class       dictionary;
+    object      fvSolution;
+}
+// * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * //
+
+solvers
+{
+    p
+    {
+        solver          GAMG;
+        tolerance       1e-6;
+        relTol          0.1;
+        smoother        GaussSeidel;
+    }
+
+    "(U|k|epsilon|omega)"
+    {
+        solver          smoothSolver;
+        smoother        symGaussSeidel;
+        tolerance       1e-6;
+        relTol          0.1;
+    }
+}
+
+SIMPLE
+{
+    nNonOrthogonalCorrectors 0;
+    pRefCell        0;
+    pRefValue       0;
+
+    residualControl
+    {
+        p               1e-4;
+        U               1e-4;
+        "(k|epsilon|omega)" 1e-4;
+    }
+}
+
+relaxationFactors
+{
+    fields
+    {
+        p               0.3;
+    }
+    equations
+    {
+        U               0.7;
+        k               0.7;
+        epsilon         0.7;
+        omega           0.7;
+    }
+}
+
+// ************************************************************************* //
+EOL
+
+echo "Created fvSolution"
+
+# Create basic transportProperties - simpler version for OpenFOAM 2.3.0
+cat > $CASE_DIR/constant/transportProperties << EOL
+/*--------------------------------*- C++ -*----------------------------------*\\
+| =========                 |                                                 |
+| \\\\      /  F ield         | OpenFOAM: The Open Source CFD Toolbox           |
+|  \\\\    /   O peration     | Version:  2.3.0                                 |
+|   \\\\  /    A nd           | Web:      www.OpenFOAM.org                      |
+|    \\\\/     M anipulation  |                                                 |
+\\*---------------------------------------------------------------------------*/
+FoamFile
+{
+    version     2.0;
+    format      ascii;
+    class       dictionary;
+    object      transportProperties;
+}
+// * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * //
+
+transportModel  Newtonian;
+
+nu              nu [0 2 -1 0 0 0 0] 3.3e-6;
+
+// ************************************************************************* //
+EOL
+
+echo "Created transportProperties"
+
+# Create basic turbulenceProperties - for OpenFOAM 2.3.0
+mkdir -p $CASE_DIR/constant/turbulenceProperties
+cat > $CASE_DIR/constant/turbulenceProperties/RASProperties << EOL
+/*--------------------------------*- C++ -*----------------------------------*\\
+| =========                 |                                                 |
+| \\\\      /  F ield         | OpenFOAM: The Open Source CFD Toolbox           |
+|  \\\\    /   O peration     | Version:  2.3.0                                 |
+|   \\\\  /    A nd           | Web:      www.OpenFOAM.org                      |
+|    \\\\/     M anipulation  |                                                 |
+\\*---------------------------------------------------------------------------*/
+FoamFile
+{
+    version     2.0;
+    format      ascii;
+    class       dictionary;
+    location    "constant";
+    object      RASProperties;
+}
+// * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * //
+
+RASModel        kOmegaSST;
+
+turbulence      on;
+
+printCoeffs     on;
+
+// ************************************************************************* //
+EOL
+
+echo "Created RASProperties"
+
+# Create initial fields - simpler version for OpenFOAM 2.3.0
+# Pressure
+cat > $CASE_DIR/0/p << EOL
+/*--------------------------------*- C++ -*----------------------------------*\\
+| =========                 |                                                 |
+| \\\\      /  F ield         | OpenFOAM: The Open Source CFD Toolbox           |
+|  \\\\    /   O peration     | Version:  2.3.0                                 |
+|   \\\\  /    A nd           | Web:      www.OpenFOAM.org                      |
+|    \\\\/     M anipulation  |                                                 |
+\\*---------------------------------------------------------------------------*/
+FoamFile
+{
+    version     2.0;
+    format      ascii;
+    class       volScalarField;
+    object      p;
+}
+// * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * //
+
+dimensions      [0 2 -2 0 0 0 0];
+
+internalField   uniform 0;
+
+boundaryField
+{
+    inlet
+    {
+        type            zeroGradient;
+    }
+
+    outlet
+    {
+        type            fixedValue;
+        value           uniform 0;
+    }
+
+    walls
+    {
+        type            zeroGradient;
+    }
+
+    frontAndBack
+    {
+        type            empty;
+    }
+}
+
+// ************************************************************************* //
+EOL
+
+echo "Created p field"
+
+# Velocity
+cat > $CASE_DIR/0/U << EOL
+/*--------------------------------*- C++ -*----------------------------------*\\
+| =========                 |                                                 |
+| \\\\      /  F ield         | OpenFOAM: The Open Source CFD Toolbox           |
+|  \\\\    /   O peration     | Version:  2.3.0                                 |
+|   \\\\  /    A nd           | Web:      www.OpenFOAM.org                      |
+|    \\\\/     M anipulation  |                                                 |
+\\*---------------------------------------------------------------------------*/
+FoamFile
+{
+    version     2.0;
+    format      ascii;
+    class       volVectorField;
+    object      U;
+}
+// * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * //
+
+dimensions      [0 1 -1 0 0 0 0];
+
+internalField   uniform (0.4 0 0);
+
+boundaryField
+{
+    inlet
+    {
+        type            fixedValue;
+        value           uniform (0.4 0 0);
+    }
+
+    outlet
+    {
+        type            zeroGradient;
+    }
+
+    walls
+    {
+        type            noSlip;
+    }
+
+    frontAndBack
+    {
+        type            empty;
+    }
+}
+
+// ************************************************************************* //
+EOL
+
+echo "Created U field"
+
+# k - turbulent kinetic energy
+cat > $CASE_DIR/0/k << EOL
+/*--------------------------------*- C++ -*----------------------------------*\\
+| =========                 |                                                 |
+| \\\\      /  F ield         | OpenFOAM: The Open Source CFD Toolbox           |
+|  \\\\    /   O peration     | Version:  2.3.0                                 |
+|   \\\\  /    A nd           | Web:      www.OpenFOAM.org                      |
+|    \\\\/     M anipulation  |                                                 |
+\\*---------------------------------------------------------------------------*/
+FoamFile
+{
+    version     2.0;
+    format      ascii;
+    class       volScalarField;
+    object      k;
+}
+// * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * //
+
+dimensions      [0 2 -2 0 0 0 0];
+
+internalField   uniform 0.0006;
+
+boundaryField
+{
+    inlet
+    {
+        type            fixedValue;
+        value           uniform 0.0006;
+    }
+
+    outlet
+    {
+        type            zeroGradient;
+    }
+
+    walls
+    {
+        type            kqRWallFunction;
+        value           uniform 0.0006;
+    }
+
+    frontAndBack
+    {
+        type            empty;
+    }
+}
+
+// ************************************************************************* //
+EOL
+
+echo "Created k field"
+
+# omega - specific dissipation rate
+cat > $CASE_DIR/0/omega << EOL
+/*--------------------------------*- C++ -*----------------------------------*\\
+| =========                 |                                                 |
+| \\\\      /  F ield         | OpenFOAM: The Open Source CFD Toolbox           |
+|  \\\\    /   O peration     | Version:  2.3.0                                 |
+|   \\\\  /    A nd           | Web:      www.OpenFOAM.org                      |
+|    \\\\/     M anipulation  |                                                 |
+\\*---------------------------------------------------------------------------*/
+FoamFile
+{
+    version     2.0;
+    format      ascii;
+    class       volScalarField;
+    object      omega;
+}
+// * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * //
+
+dimensions      [0 0 -1 0 0 0 0];
+
+internalField   uniform 100;
+
+boundaryField
+{
+    inlet
+    {
+        type            fixedValue;
+        value           uniform 100;
+    }
+
+    outlet
+    {
+        type            zeroGradient;
+    }
+
+    walls
+    {
+        type            omegaWallFunction;
+        value           uniform 100;
+    }
+
+    frontAndBack
+    {
+        type            empty;
+    }
+}
+
+// ************************************************************************* //
+EOL
+
+echo "Created omega field"
+
+# Create nut - turbulent viscosity (for kOmegaSST model)
+cat > $CASE_DIR/0/nut << EOL
+/*--------------------------------*- C++ -*----------------------------------*\\
+| =========                 |                                                 |
+| \\\\      /  F ield         | OpenFOAM: The Open Source CFD Toolbox           |
+|  \\\\    /   O peration     | Version:  2.3.0                                 |
+|   \\\\  /    A nd           | Web:      www.OpenFOAM.org                      |
+|    \\\\/     M anipulation  |                                                 |
+\\*---------------------------------------------------------------------------*/
+FoamFile
+{
+    version     2.0;
+    format      ascii;
+    class       volScalarField;
+    object      nut;
+}
+// * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * //
+
+dimensions      [0 2 -1 0 0 0 0];
+
+internalField   uniform 0;
+
+boundaryField
+{
+    inlet
+    {
+        type            calculated;
+        value           uniform 0;
+    }
+
+    outlet
+    {
+        type            calculated;
+        value           uniform 0;
+    }
+
+    walls
+    {
+        type            nutkWallFunction;
+        value           uniform 0;
+    }
+
+    frontAndBack
+    {
+        type            empty;
+    }
+}
+
+// ************************************************************************* //
+EOL
+
+echo "Created nut field"
+
+# Run blockMesh to generate the mesh
+echo "Running blockMesh..."
+cd $CASE_DIR
+blockMesh > blockMesh.log 2>&1
+BLOCK_MESH_STATUS=$?
+
+# Check if blockMesh was successful
+if [ $BLOCK_MESH_STATUS -eq 0 ]; then
+    echo "blockMesh completed successfully"
+    
+    # Check mesh quality
+    echo "Checking mesh quality..."
+    checkMesh > checkMesh.log 2>&1
+    
+    # Create a case.foam file for ParaView
+    touch case.foam
+    echo "Created case.foam file for ParaView"
+    
+    # Run the simulation
+    echo "Starting OpenFOAM simulation..."
+    simpleFoam > simpleFoam.log 2>&1
+    
+    # Check if simulation completed successfully
+    if [ $? -eq 0 ]; then
+        echo "Simulation completed successfully!"
+        
+        # Get the latest time directory
+        LATEST_TIME=$(find . -maxdepth 1 -name "[0-9]*" | sort -n | tail -1)
+        if [ -n "$LATEST_TIME" ]; then
+            LATEST_TIME_VALUE=$(basename $LATEST_TIME)
+            echo "Latest time directory: $LATEST_TIME_VALUE"
+            echo "Simulation results available in directory: $(pwd)"
+        else
+            echo "No time directories found. Simulation may not have written any results."
+        fi
+    else
+        echo "Simulation failed. Check log: $(pwd)/simpleFoam.log"
+        echo "Last 20 lines of simpleFoam.log:"
+        tail -n 20 simpleFoam.log
+    fi
+else
+    echo "blockMesh failed. Here's the blockMesh.log content:"
+    cat blockMesh.log
+fi
+
+cd ..
+echo "Job completed at $(date)"
