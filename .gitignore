@@ -16,6 +16,7 @@ aorta_*/
 */VTK/
 *.png
 *.jpg
+*.zip
 *.o*
 *.e*
 
