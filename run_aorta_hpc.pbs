@@ -1,0 +1,93 @@
+#!/bin/bash
+#PBS -l walltime=01:00:00
+#PBS -l select=1:ncpus=4:mem=8gb
+#PBS -N aorta_stenosis
+#PBS -j oe
+
+# Go to the directory from which the job was submitted
+cd $PBS_O_WORKDIR
+echo "Working directory: $(pwd)"
+
+# Load required modules
+echo "Loading required modules..."
+module load tools/prod
+module load mpi/intel-2018
+module load openfoam/2.4.0
+
+# Source OpenFOAM environment - HPC-specific approach
+echo "Setting up OpenFOAM environment..."
+# Try multiple approaches to find OpenFOAM bashrc
+if [ -n "$FOAM_BASH" ]; then
+    echo "Using environment variable: $FOAM_BASH"
+    source $FOAM_BASH
+elif [ -n "$FOAM_INST_DIR" ] && [ -f "$FOAM_INST_DIR/OpenFOAM-2.4.0/etc/bashrc" ]; then
+    echo "Using FOAM_INST_DIR: $FOAM_INST_DIR/OpenFOAM-2.4.0/etc/bashrc"
+    source "$FOAM_INST_DIR/OpenFOAM-2.4.0/etc/bashrc"
+elif [ -d "/opt/openfoam240" ] && [ -f "/opt/openfoam240/etc/bashrc" ]; then
+    echo "Using standard installation path: /opt/openfoam240/etc/bashrc"
+    source "/opt/openfoam240/etc/bashrc"
+elif [ -f "$HOME/OpenFOAM/OpenFOAM-2.4.0/etc/bashrc" ]; then
+    echo "Using user installation: $HOME/OpenFOAM/OpenFOAM-2.4.0/etc/bashrc"
+    source "$HOME/OpenFOAM/OpenFOAM-2.4.0/etc/bashrc"
+else
+    echo "Attempting to locate OpenFOAM bashrc file..."
+    # Try to find the OpenFOAM bashrc file in common locations
+    BASHRC_PATH=$(find /opt /usr/local $HOME -name "bashrc" -path "*OpenFOAM*2.4*" 2>/dev/null | head -1)
+    
+    if [ -n "$BASHRC_PATH" ]; then
+        echo "Found OpenFOAM bashrc at: $BASHRC_PATH"
+        source "$BASHRC_PATH"
+    else
+        echo "WARNING: Could not find OpenFOAM environment file to source."
+        echo "Attempting to proceed with default environment..."
+    fi
+fi
+
+# Print simulation parameters
+echo "======================================================="
+echo "Simulation parameters:"
+echo "  Stenosis level: $STENOSIS_LEVEL"
+echo "  Case name: $CASE_NAME"
+echo "  Mesh size: $MESH_SIZE"
+echo "  Max iterations: $MAX_ITERATIONS"
+echo "======================================================="
+
+# Run the simulation using the runStenosisv3.sh script
+# Ensure script is executable
+chmod +x runStenosisv3.sh
+
+# Execute with parameters
+./runStenosisv3.sh --level $STENOSIS_LEVEL --name $CASE_NAME --mesh $MESH_SIZE --iterations $MAX_ITERATIONS --mesher block
+
+# After simulation completes, check if it was successful
+CASE_DIR="aorta_simulation_${CASE_NAME}"
+if [ -d "$CASE_DIR" ]; then
+    # Get the latest time directory
+    LATEST_TIME=$(find "$CASE_DIR" -maxdepth 1 -name "[0-9]*" | sort -n | tail -1)
+    
+    if [ -n "$LATEST_TIME" ]; then
+        echo "Simulation completed successfully. Latest time directory: $(basename $LATEST_TIME)"
+        
+        # Run post-processing if available
+        if [ -f "plot_results.py" ]; then
+            echo "Running post-processing..."
+            
+            # Check if we have Python module available
+            if command -v python3 &> /dev/null; then
+                module load Python/3.9.6  # Adjust version if needed
+                python3 plot_results.py --dirs "$CASE_DIR" --all
+                echo "Post-processing completed. Results in plots/ directory."
+            else
+                echo "Python not available for post-processing. Please run manually."
+            fi
+        fi
+    else
+        echo "Simulation may have failed. No time directories found in $CASE_DIR."
+        echo "Check log files for details."
+    fi
+else
+    echo "Simulation failed. Output directory $CASE_DIR not found."
+    echo "Check logs for details."
+fi
+
+echo "Job completed at $(date)"

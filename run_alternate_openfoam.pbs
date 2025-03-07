@@ -1,0 +1,695 @@
+#!/bin/bash
+#PBS -l walltime=01:00:00
+#PBS -l select=1:ncpus=4:mem=8gb
+#PBS -N aorta_alternate
+#PBS -j oe
+
+# =========================================================
+# AORTA CFD ON HPC - TRYING ALTERNATE OPENFOAM VERSIONS
+# =========================================================
+
+# Go to the directory from which the job was submitted
+cd $PBS_O_WORKDIR
+echo "Working directory: $(pwd)"
+
+# Load required modules
+echo "Loading tools/prod..."
+module load tools/prod
+
+# Try loading several alternative OpenFOAM versions, in order of likelihood to work
+# Older versions are often compiled with fewer optimization flags
+OPENFOAM_VERSIONS=(
+    "openfoam/2.3.1"  # Try an older version first
+    "openfoam/2.3.0"
+    "openfoam/2.2.0"
+    "openfoam/2.1.1"
+    "foam/4.1"        # Try alternate naming schemes
+    "foam"
+    "openfoam"        # Try default version
+    "openfoam/2.4.0"  # Try original version last
+)
+
+# Try to load each version until one works
+OPENFOAM_LOADED=false
+for version in "${OPENFOAM_VERSIONS[@]}"; do
+    echo "Attempting to load $version..."
+    
+    # Try to load the module
+    module load $version 2>/dev/null
+    
+    # Create a test directory
+    TEST_DIR="test_$version"
+    mkdir -p $TEST_DIR/system
+    
+    # Create a very simple blockMeshDict
+    cat > $TEST_DIR/system/blockMeshDict << EOL
+FoamFile
+{
+    version     2.0;
+    format      ascii;
+    class       dictionary;
+    object      blockMeshDict;
+}
+
+convertToMeters 1;
+
+vertices
+(
+    (0 0 0)
+    (1 0 0)
+    (1 1 0)
+    (0 1 0)
+    (0 0 1)
+    (1 0 1)
+    (1 1 1)
+    (0 1 1)
+);
+
+blocks
+(
+    hex (0 1 2 3 4 5 6 7) (5 5 5) simpleGrading (1 1 1)
+);
+
+edges
+(
+);
+
+boundary
+(
+    allBoundary
+    {
+        type patch;
+        faces
+        (
+            (0 4 7 3)
+            (1 5 6 2)
+            (0 1 5 4)
+            (3 7 6 2)
+            (0 3 2 1)
+            (4 5 6 7)
+        );
+    }
+);
+EOL
+
+    # Test if blockMesh works with this version
+    cd $TEST_DIR
+    echo "Testing if blockMesh works with $version..."
+    blockMesh > blockMesh.log 2>&1
+    RESULT=$?
+    cd ..
+    
+    if [ $RESULT -eq 0 ]; then
+        echo "SUCCESS: $version works on this system!"
+        OPENFOAM_LOADED=true
+        WORKING_VERSION=$version
+        
+        # Clean up test directory
+        rm -rf $TEST_DIR
+        break
+    else
+        echo "FAILED: $version does not work on this system."
+        echo "Error from log:"
+        cat $TEST_DIR/blockMesh.log | tail -5
+        
+        # Clean up test directory
+        rm -rf $TEST_DIR
+        
+        # Unload the module before trying the next one
+        module unload $version 2>/dev/null
+    fi
+done
+
+if [ "$OPENFOAM_LOADED" = false ]; then
+    echo "ERROR: Could not find a working OpenFOAM version."
+    echo "Please contact HPC support for assistance."
+    exit 1
+fi
+
+echo "Using OpenFOAM version: $WORKING_VERSION"
+
+# Source OpenFOAM environment
+echo "Setting up OpenFOAM environment..."
+
+# Try to locate the bashrc file
+BASHRC_PATH=""
+if [ -n "$FOAM_INST_DIR" ] && [ -d "$FOAM_INST_DIR" ]; then
+    FOUND_BASHRC=$(find $FOAM_INST_DIR -name "bashrc" -path "*OpenFOAM*" 2>/dev/null | head -1)
+    if [ -n "$FOUND_BASHRC" ]; then
+        BASHRC_PATH=$FOUND_BASHRC
+    fi
+fi
+
+if [ -z "$BASHRC_PATH" ] && [ -d "/apps" ]; then
+    FOUND_BASHRC=$(find /apps -name "bashrc" -path "*OpenFOAM*" 2>/dev/null | head -1)
+    if [ -n "$FOUND_BASHRC" ]; then
+        BASHRC_PATH=$FOUND_BASHRC
+    fi
+fi
+
+if [ -n "$BASHRC_PATH" ]; then
+    echo "Found OpenFOAM bashrc at: $BASHRC_PATH"
+    source "$BASHRC_PATH"
+else
+    echo "WARNING: Could not find OpenFOAM environment file to source."
+    echo "Attempting to proceed with default environment..."
+fi
+
+# Verify OpenFOAM is available
+if command -v simpleFoam &> /dev/null; then
+    echo "OpenFOAM successfully loaded: $(which simpleFoam)"
+    simpleFoam --version 2>&1 | head -1
+else
+    echo "ERROR: simpleFoam command not found. OpenFOAM not properly configured."
+    exit 1
+fi
+
+# Set parameters
+STENOSIS_LEVEL=${LEVEL:-0.5}
+CASE_NAME=${NAME:-"moderate"}
+MESH_SIZE=${MESH:-0.5}
+MAX_ITERATIONS=${ITER:-1000}
+
+echo "======================================================="
+echo "Simulation parameters:"
+echo "  Stenosis level: $STENOSIS_LEVEL"
+echo "  Case name: $CASE_NAME"
+echo "  Mesh size: $MESH_SIZE"
+echo "  Max iterations: $MAX_ITERATIONS"
+echo "======================================================="
+
+# Create case directory
+case_dir="aorta_simulation_${CASE_NAME}"
+echo "Creating simulation in: $case_dir"
+
+# Create directories
+if [ -d "$case_dir" ]; then
+    echo "Directory $case_dir already exists. Cleaning up..."
+    rm -rf "$case_dir"
+fi
+
+mkdir -p "$case_dir"
+mkdir -p "$case_dir/0"
+mkdir -p "$case_dir/constant"
+mkdir -p "$case_dir/system"
+
+# Create simple OpenFOAM configuration files - adapted for older OpenFOAM
+echo "Creating OpenFOAM configuration files..."
+
+# Create the controlDict - simplified for compatibility
+control_dict_file="$case_dir/system/controlDict"
+cat > "$control_dict_file" << EOL
+FoamFile
+{
+    version     2.0;
+    format      ascii;
+    class       dictionary;
+    location    "system";
+    object      controlDict;
+}
+
+application     simpleFoam;
+startFrom       startTime;
+startTime       0;
+stopAt          endTime;
+endTime         1000;
+deltaT          1;
+writeControl    timeStep;
+writeInterval   200;
+purgeWrite      0;
+writeFormat     ascii;
+writePrecision  6;
+writeCompression off;
+timeFormat      general;
+timePrecision   6;
+runTimeModifiable true;
+
+functions
+{
+}
+EOL
+
+# Create fvSchemes - simplified
+fv_schemes_file="$case_dir/system/fvSchemes"
+cat > "$fv_schemes_file" << EOL
+FoamFile
+{
+    version     2.0;
+    format      ascii;
+    class       dictionary;
+    location    "system";
+    object      fvSchemes;
+}
+
+ddtSchemes
+{
+    default         steadyState;
+}
+
+gradSchemes
+{
+    default         Gauss linear;
+}
+
+divSchemes
+{
+    default         none;
+    div(phi,U)      Gauss upwind;
+    div(phi,k)      Gauss upwind;
+    div(phi,epsilon) Gauss upwind;
+    div(phi,omega)  Gauss upwind;
+    div((nuEff*dev2(T(grad(U))))) Gauss linear;
+}
+
+laplacianSchemes
+{
+    default         Gauss linear corrected;
+}
+
+interpolationSchemes
+{
+    default         linear;
+}
+
+snGradSchemes
+{
+    default         corrected;
+}
+EOL
+
+# Create fvSolution - simplified
+fv_solution_file="$case_dir/system/fvSolution"
+cat > "$fv_solution_file" << EOL
+FoamFile
+{
+    version     2.0;
+    format      ascii;
+    class       dictionary;
+    location    "system";
+    object      fvSolution;
+}
+
+solvers
+{
+    p
+    {
+        solver          PCG;
+        preconditioner  DIC;
+        tolerance       1e-06;
+        relTol          0.01;
+    }
+
+    "(U|k|epsilon|omega)"
+    {
+        solver          smoothSolver;
+        smoother        symGaussSeidel;
+        tolerance       1e-05;
+        relTol          0.1;
+    }
+}
+
+SIMPLE
+{
+    nNonOrthogonalCorrectors 0;
+    pRefCell        0;
+    pRefValue       0;
+}
+
+relaxationFactors
+{
+    p               0.3;
+    U               0.7;
+    k               0.7;
+    epsilon         0.7;
+    omega           0.7;
+}
+EOL
+
+# Create transportProperties - simplified
+transport_file="$case_dir/constant/transportProperties"
+cat > "$transport_file" << EOL
+FoamFile
+{
+    version     2.0;
+    format      ascii;
+    class       dictionary;
+    location    "constant";
+    object      transportProperties;
+}
+
+transportModel  Newtonian;
+nu              nu [0 2 -1 0 0 0 0] 3.3e-6;
+EOL
+
+# Create turbulenceProperties - for older OpenFOAM versions
+mkdir -p "$case_dir/constant/RASProperties"
+turbulence_file="$case_dir/constant/RASProperties"
+cat > "$turbulence_file" << EOL
+FoamFile
+{
+    version     2.0;
+    format      ascii;
+    class       dictionary;
+    location    "constant";
+    object      RASProperties;
+}
+
+RASModel        kOmegaSST;
+turbulence      on;
+printCoeffs     on;
+EOL
+
+# Create initial conditions (p field)
+p_file="$case_dir/0/p"
+cat > "$p_file" << EOL
+FoamFile
+{
+    version     2.0;
+    format      ascii;
+    class       volScalarField;
+    object      p;
+}
+
+dimensions      [0 2 -2 0 0 0 0];
+internalField   uniform 0;
+
+boundaryField
+{
+    inlet
+    {
+        type            zeroGradient;
+    }
+    outlet
+    {
+        type            fixedValue;
+        value           uniform 0;
+    }
+    wall
+    {
+        type            zeroGradient;
+    }
+    frontAndBack
+    {
+        type            empty;
+    }
+}
+EOL
+
+# Create U (velocity) field
+u_file="$case_dir/0/U"
+cat > "$u_file" << EOL
+FoamFile
+{
+    version     2.0;
+    format      ascii;
+    class       volVectorField;
+    object      U;
+}
+
+dimensions      [0 1 -1 0 0 0 0];
+internalField   uniform (0.4 0 0);
+
+boundaryField
+{
+    inlet
+    {
+        type            fixedValue;
+        value           uniform (0.4 0 0);
+    }
+    outlet
+    {
+        type            zeroGradient;
+    }
+    wall
+    {
+        type            fixedValue;
+        value           uniform (0 0 0);
+    }
+    frontAndBack
+    {
+        type            empty;
+    }
+}
+EOL
+
+# Create k (turbulent kinetic energy) field
+k_file="$case_dir/0/k"
+cat > "$k_file" << EOL
+FoamFile
+{
+    version     2.0;
+    format      ascii;
+    class       volScalarField;
+    object      k;
+}
+
+dimensions      [0 2 -2 0 0 0 0];
+internalField   uniform 0.0006;
+
+boundaryField
+{
+    inlet
+    {
+        type            fixedValue;
+        value           uniform 0.0006;
+    }
+    outlet
+    {
+        type            zeroGradient;
+    }
+    wall
+    {
+        type            kqRWallFunction;
+        value           uniform 0.0006;
+    }
+    frontAndBack
+    {
+        type            empty;
+    }
+}
+EOL
+
+# Create omega (specific dissipation rate) field
+omega_file="$case_dir/0/omega"
+cat > "$omega_file" << EOL
+FoamFile
+{
+    version     2.0;
+    format      ascii;
+    class       volScalarField;
+    object      omega;
+}
+
+dimensions      [0 0 -1 0 0 0 0];
+internalField   uniform 100;
+
+boundaryField
+{
+    inlet
+    {
+        type            fixedValue;
+        value           uniform 100;
+    }
+    outlet
+    {
+        type            zeroGradient;
+    }
+    wall
+    {
+        type            omegaWallFunction;
+        value           uniform 100;
+    }
+    frontAndBack
+    {
+        type            empty;
+    }
+}
+EOL
+
+# Create a very simple blockMeshDict with minimal features
+echo "Creating simplified blockMeshDict..."
+block_mesh_file="$case_dir/system/blockMeshDict"
+cat > "$block_mesh_file" << EOL
+FoamFile
+{
+    version     2.0;
+    format      ascii;
+    class       dictionary;
+    location    "system";
+    object      blockMeshDict;
+}
+
+convertToMeters 0.001;
+
+vertices
+(
+    // Bottom face, inlet to stenosis start
+    (0        -12.5     0)          // 0
+    (65       -12.5     0)          // 1
+    (65       -12.5     1)          // 2
+    (0        -12.5     1)          // 3
+    
+    // Bottom face at stenosis
+    (75       -6.25     0)          // 4
+    (75       -6.25     1)          // 5
+    
+    // Bottom face, stenosis to outlet
+    (85       -12.5     0)          // 6
+    (85       -12.5     1)          // 7
+    (150      -12.5     0)          // 8
+    (150      -12.5     1)          // 9
+    
+    // Top face, inlet to stenosis start
+    (0        12.5      0)          // 10
+    (65       12.5      0)          // 11
+    (65       12.5      1)          // 12
+    (0        12.5      1)          // 13
+    
+    // Top face at stenosis
+    (75       6.25      0)          // 14
+    (75       6.25      1)          // 15
+    
+    // Top face, stenosis to outlet
+    (85       12.5      0)          // 16
+    (85       12.5      1)          // 17
+    (150      12.5      0)          // 18
+    (150      12.5      1)          // 19
+);
+
+blocks
+(
+    // Block 0: Inlet to stenosis start
+    hex (0 1 11 10 3 2 12 13)
+    (20 8 1)
+    simpleGrading (1 1 1)
+    
+    // Block 1: Stenosis section (first half)
+    hex (1 4 14 11 2 5 15 12)
+    (10 8 1)
+    simpleGrading (1 1 1)
+    
+    // Block 2: Stenosis section (second half)
+    hex (4 6 16 14 5 7 17 15)
+    (10 8 1)
+    simpleGrading (1 1 1)
+    
+    // Block 3: Outlet section
+    hex (6 8 18 16 7 9 19 17)
+    (20 8 1)
+    simpleGrading (1 1 1)
+);
+
+edges
+(
+);
+
+boundary
+(
+    inlet
+    {
+        type patch;
+        faces
+        (
+            (0 10 13 3)
+        );
+    }
+    outlet
+    {
+        type patch;
+        faces
+        (
+            (8 9 19 18)
+        );
+    }
+    wall
+    {
+        type wall;
+        faces
+        (
+            // Bottom wall
+            (0 1 2 3)
+            (1 4 5 2)
+            (4 6 7 5)
+            (6 8 9 7)
+            
+            // Top wall
+            (10 13 12 11)
+            (11 12 15 14)
+            (14 15 17 16)
+            (16 17 19 18)
+        );
+    }
+    frontAndBack
+    {
+        type empty;
+        faces
+        (
+            // Front face (z=0)
+            (0 1 11 10)
+            (1 4 14 11)
+            (4 6 16 14)
+            (6 8 18 16)
+            
+            // Back face (z=thickness)
+            (3 13 12 2)
+            (2 12 15 5)
+            (5 15 17 7)
+            (7 17 19 9)
+        );
+    }
+);
+EOL
+
+# Create a case.foam file for ParaView
+touch "$case_dir/case.foam"
+echo "Created case.foam file for ParaView"
+
+# Generate mesh
+echo "Generating mesh with blockMesh..."
+cd "$case_dir"
+blockMesh > blockMesh.log 2>&1
+
+if [ $? -ne 0 ]; then
+    echo "blockMesh failed. Check log for details: blockMesh.log"
+    cat blockMesh.log
+    cd ..
+    exit 1
+fi
+echo "blockMesh completed successfully"
+
+# Check mesh quality (if available)
+if command -v checkMesh &> /dev/null; then
+    echo "Checking mesh quality..."
+    checkMesh > checkMesh.log 2>&1
+else
+    echo "checkMesh command not available, skipping mesh check."
+fi
+
+# Run the simulation
+echo "Starting OpenFOAM simulation..."
+simpleFoam > simpleFoam.log 2>&1
+
+# Check if simulation completed successfully
+if [ $? -eq 0 ]; then
+    echo "Simulation completed successfully!"
+    
+    # Get the latest time directory
+    latest_time=$(find . -maxdepth 1 -name "[0-9]*" | sort -n | tail -1)
+    latest_time_value=$(basename "$latest_time")
+    
+    if [ ! -z "$latest_time_value" ]; then
+        echo "Latest time directory: $latest_time_value"
+        cd ..
+        echo "Results available in directory: $case_dir"
+    else
+        cd ..
+        echo "No time directories found. Simulation may have failed."
+    fi
+else
+    echo "Simulation encountered errors. Check log file: simpleFoam.log"
+    echo "Last 20 lines of the log file:"
+    tail -n 20 simpleFoam.log
+    cd ..
+fi
+
+echo "Job completed at $(date)"
